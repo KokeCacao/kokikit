@@ -35,7 +35,7 @@ class RayBundle:
         if directions is not None:
             assert torch.allclose(torch.norm(directions, dim=-1), torch.ones_like(directions[..., 0])), f"torch.norm(directions, dim=-1)={torch.norm(directions, dim=-1)}"
         self.directions = directions # None or [B, H, W, 3] (or [B, H*W, 3] if sampled)
-        self.nearsnear_plane = nears # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
+        self.nears = nears # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
         self.fars = fars # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
         assert self.nears is None or self.fars is None or torch.all(self.nears <= self.fars), f"self.fars - self.nears={(self.fars - self.nears).min()}"
         self.forward_vector = forward_vector # None or [B, 3], assume always look at origin
