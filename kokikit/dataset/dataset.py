@@ -52,7 +52,7 @@ class Dataset:
         forward_vector = safe_normalize(targets - rays_o) # [B, 3]
         up_vector = torch.tensor([0.0, 1.0, 0.0], device=device).unsqueeze(0).repeat(batch_size, 1) # [B, 3]
         right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1)) # [B, 3]
-        up_vector = safe_normalize(torch.cross(forward_vector, right_vector, dim=-1)) # [B, 3]
+        up_vector = safe_normalize(torch.cross(right_vector, forward_vector, dim=-1)) # [B, 3]
 
         return up_vector, right_vector, forward_vector # [B, 3], [B, 3], [B, 3]
 

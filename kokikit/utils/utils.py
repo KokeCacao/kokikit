@@ -119,3 +119,38 @@ def get_mem_info():
         f"Total: {'|'.join(f'{gpu_gb_total:.1f}' for gpu_gb_total in gpu_gbs_total)}G",
     ]
     return ' | '.join(ret)
+
+def quaternion_to_3x3_rotation(quaternion: Tensor):
+    norm = torch.sqrt(quaternion[:,0]*quaternion[:,0] + quaternion[:,1]*quaternion[:,1] + quaternion[:,2]*quaternion[:,2] + quaternion[:,3]*quaternion[:,3])
+
+    quaternion = quaternion / norm[:, None] # [B, 4]
+
+    R = torch.zeros((quaternion.size(0), 3, 3), device=quaternion.device, dtype=quaternion.dtype)
+
+    quaternion = quaternion[:, 0]
+    x = quaternion[:, 1]
+    y = quaternion[:, 2]
+    z = quaternion[:, 3]
+
+    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    R[:, 0, 1] = 2 * (x*y - quaternion*z)
+    R[:, 0, 2] = 2 * (x*z + quaternion*y)
+    R[:, 1, 0] = 2 * (x*y + quaternion*z)
+    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    R[:, 1, 2] = 2 * (y*z - quaternion*x)
+    R[:, 2, 0] = 2 * (x*z - quaternion*y)
+    R[:, 2, 1] = 2 * (y*z + quaternion*x)
+    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return R # [B, 3, 3]
+
+def scale_quaternion_to_3x3_matrix(scale: Tensor, quaternion: Tensor):
+    # scale: [B, 3]
+    # quaternion: [B, 4]
+    R = quaternion_to_3x3_rotation(quaternion)
+    
+    S = torch.eye(3, device=scale.device, dtype=scale.dtype).repeat(scale.shape[0], 1, 1)
+    for i in range(3):
+        S[:, i, i] = scale[:, i]
+    
+    combined_transform = torch.matmul(R, S)
+    return combined_transform # [B, 3, 3]

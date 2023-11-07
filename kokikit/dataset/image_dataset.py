@@ -31,6 +31,10 @@ class ImageDataset(Dataset):
         samples = torch.meshgrid(w, h, indexing='xy')
         samples = torch.stack(samples, dim=-1).unsqueeze(0) # [1, H, W, 2]
         return RayBundle(
+            near_plane=0,
+            far_plane=0,
+            fov_x=0,
+            fov_y=0,
             origins=samples.expand(batch_size, -1, -1, -1),
             collider=None,
             directions=None,
@@ -38,6 +42,7 @@ class ImageDataset(Dataset):
             fars=None,
             forward_vector=torch.tensor([0.0, 0.0, -1.0], device=device).unsqueeze(0).expand(batch_size, -1),
             mvp=None,
+            c2w=None,
         ) # No positional encoding since we use SIREN
 
     def get_eval_ray_bundle(self, h_latent: int, w_latent: int, c2w: Tensor, fov: float, focal: float, near: float, far: float) -> RayBundle:
@@ -63,6 +68,10 @@ class ImageDataset(Dataset):
         ) # [B, 3], [B, 3], [B, 3]
 
         return RayBundle(
+            near_plane=0,
+            far_plane=0,
+            fov_x=0,
+            fov_y=0,
             origins=samples.expand(1, -1, -1, -1),
             collider=None,
             directions=None,
@@ -70,6 +79,7 @@ class ImageDataset(Dataset):
             fars=None,
             forward_vector=forward_vector,
             mvp=None,
+            c2w=None,
         ) # No positional encoding since we use SIREN
 
     def get_test_ray_bundle(
@@ -104,6 +114,10 @@ class ImageDataset(Dataset):
         ) # [B, 3], [B, 3], [B, 3]
 
         return RayBundle(
+            near_plane=0,
+            far_plane=0,
+            fov_x=0,
+            fov_y=0,
             origins=samples.expand(selected_batch_size, -1, -1, -1),
             collider=None,
             directions=None,
@@ -111,4 +125,5 @@ class ImageDataset(Dataset):
             fars=None,
             forward_vector=forward_vector,
             mvp=None,
+            c2w=None,
         ) # No positional encoding since we use SIREN

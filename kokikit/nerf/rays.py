@@ -13,6 +13,10 @@ class RayBundle:
 
     def __init__(
         self,
+        near_plane: float,
+        far_plane: float,
+        fov_x: float,
+        fov_y: float,
         origins: Tensor,
         collider: Optional[Collider],
         directions: Optional[Tensor],
@@ -20,17 +24,24 @@ class RayBundle:
         fars: Optional[Tensor],
         forward_vector: Tensor,
         mvp: Optional[Tensor],
+        c2w: Optional[Tensor],
     ) -> None:
+        self.near_plane = near_plane
+        self.far_plane = far_plane
+        self.fov_x = fov_x
+        self.fov_y = fov_y
+        
         self.origins = origins # [B, H, W, 2] or [B, H, W, 3] (or [B, H*W, 3] if sampled)
         if directions is not None:
             assert torch.allclose(torch.norm(directions, dim=-1), torch.ones_like(directions[..., 0])), f"torch.norm(directions, dim=-1)={torch.norm(directions, dim=-1)}"
         self.directions = directions # None or [B, H, W, 3] (or [B, H*W, 3] if sampled)
-        self.nears = nears # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
+        self.nearsnear_plane = nears # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
         self.fars = fars # None or [B, H, W, 1] (or [B, H*W, 1] if sampled)
         assert self.nears is None or self.fars is None or torch.all(self.nears <= self.fars), f"self.fars - self.nears={(self.fars - self.nears).min()}"
         self.forward_vector = forward_vector # None or [B, 3], assume always look at origin
         self.collider = collider # None or Collider
         self.mvp = mvp # None or [B, 4, 4]
+        self.c2w = c2w # None or [B, 4, 4]
 
     def get_thetas_phis(self) -> Tuple[Tensor, Tensor]:
         backward_vector = -self.forward_vector # [B, 3]
@@ -83,16 +94,32 @@ class RayBundle:
             self.nears = self.nears.to(device=device, dtype=dtype)
         if self.fars is not None:
             self.fars = self.fars.to(device=device, dtype=dtype)
+        if self.c2w is not None:
+            self.c2w = self.c2w.to(device=device, dtype=dtype)
 
         # tensors don't go to device:
         # self.forward_vector = self.forward_vector
+        # self.mvp = self.mvp
         return self
 
     def get_sampled_rays(self, num_samples: int) -> "RayBundle":
         # sample num_samples rays from the ray bundle, return a new RayBundle object
         # however, sampled rays will have different shapes
         if self.origins.shape[1] * self.origins.shape[2] < num_samples:
-            return RayBundle(origins=self.origins, directions=self.directions, collider=self.collider, nears=self.nears, fars=self.fars, forward_vector=self.forward_vector, mvp=self.mvp)
+            return RayBundle(
+                near_plane=self.near_plane,
+                far_plane=self.far_plane,
+                fov_x=self.fov_x,
+                fov_y=self.fov_y,
+                origins=self.origins,
+                directions=self.directions,
+                collider=self.collider,
+                nears=self.nears,
+                fars=self.fars,
+                forward_vector=self.forward_vector,
+                mvp=self.mvp,
+                c2w=self.c2w,
+            )
 
         idx = torch.randperm(self.origins.shape[1] * self.origins.shape[2], device=self.origins.device)[:num_samples] # [num_samples,]
         h = idx // self.origins.shape[2]
@@ -107,7 +134,20 @@ class RayBundle:
             nears = self.nears[:, h, w, :] # [B, num_samples, 1]
         if self.fars is not None:
             fars = self.fars[:, h, w, :] # [B, num_samples, 1]
-        return RayBundle(origins=origins, directions=directions, collider=self.collider, nears=nears, fars=fars, forward_vector=self.forward_vector, mvp=self.mvp) # [B, num_samples, 2] or [B, num_samples, 3], [B, num_samples, 3], [B, num_samples], [B, num_samples], [B,]
+        return RayBundle(
+            near_plane=self.near_plane,
+            far_plane=self.far_plane,
+            fov_x=self.fov_x,
+            fov_y=self.fov_y,
+            origins=origins,
+            directions=directions,
+            collider=self.collider,
+            nears=nears,
+            fars=fars,
+            forward_vector=self.forward_vector,
+            mvp=self.mvp,
+            c2w=self.c2w,
+        ) # [B, num_samples, 2] or [B, num_samples, 3], [B, num_samples, 3], [B, num_samples], [B, num_samples], [B,]
 
     def to_dict(self) -> dict:
         d = self.get_sampled_rays(16).__dict__ # always sample 16 rays per batch

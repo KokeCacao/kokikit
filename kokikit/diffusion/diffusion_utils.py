@@ -216,7 +216,7 @@ def predict_noise_mvdream(
     pred = unet_mvdream(
         x=torch.cat([latents_noised] * 2),
         timesteps=torch.tensor([t] * batch_size * 2, device=t.device),
-        context=torch.stack(text_embeddings_unconditional + text_embeddings_conditional),
+        context=torch.stack(text_embeddings_conditional + text_embeddings_unconditional),
         num_frames=batch_size,
         camera=torch.cat([camera_embeddings] * 2),
     )

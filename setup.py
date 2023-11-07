@@ -23,6 +23,8 @@ if __name__ == "__main__":
             "numpy",
             "diffusers",
             # "git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch",
+            # "git+https://github.com/ashawkey/diff-gaussian-rasterization"
+            # "git+https://gitlab.inria.fr/bkerbl/simple-knn"
         ],
         extras_require={
             "full": [
