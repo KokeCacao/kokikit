@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import warnings
+import random
 try:
     import tinycudann as tcnn
 except EnvironmentError as e:
@@ -102,7 +103,14 @@ class NeRFField(torch.nn.Module):
 
 class SHMLPBackground(torch.nn.Module):
 
-    def __init__(self, color_activation: Union[torch.nn.Module, Callable[..., Any]], *args, **kwargs) -> None:
+    def __init__(
+        self,
+        color_activation: Union[torch.nn.Module, Callable[..., Any]],
+        random_background_probability: float,
+        same_random_across_batch: bool,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.n_output_dims = 3
         self.encoder = tcnn.Encoding(
@@ -121,7 +129,9 @@ class SHMLPBackground(torch.nn.Module):
             bias=False,
         )
         self.color_activation = color_activation
-    
+        self.random_background_probability = random_background_probability
+        self.same_random_across_batch = same_random_across_batch
+
     def to_device(self, device: torch.device):
         self.encoder = self.encoder.to(device)
         self.mlp = self.mlp.to(device)
@@ -139,9 +149,21 @@ class SHMLPBackground(torch.nn.Module):
         return super().parameters(recurse)
 
     def forward(self, dirs: Tensor) -> Tensor:
-        dirs = (dirs + 1.0) / 2.0 # (-1, 1) => (0, 1)
-        dirs_embd = self.encoder(dirs.reshape(-1, 3)) # WARNING: not sure RuntimeError: view size is not compatible with input tensor's size and stride (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
-        color = self.mlp(dirs_embd).view(*dirs.shape[:-1], self.n_output_dims)
+        if random.random() < self.random_background_probability:
+            assert dirs.dim() >= 4 # [B, H, W, 3]
+            color = torch.rand(
+                1 if self.same_random_across_batch else dirs.shape[0],
+                1,
+                1,
+                self.n_output_dims,
+                dtype=dirs.dtype,
+                device=dirs.device,
+                requires_grad=False,
+            ).expand(dirs.shape[0], dirs.shape[1], dirs.shape[2], self.n_output_dims)
+        else:
+            dirs = (dirs + 1.0) / 2.0 # (-1, 1) => (0, 1) # [B, W, H, 3]
+            dirs_embd = self.encoder(dirs.reshape(-1, 3))
+            color = self.mlp(dirs_embd).view(*dirs.shape[:-1], self.n_output_dims)
         color = self.color_activation(color)
         return color
 
@@ -380,7 +402,7 @@ class NeRFAccField(torch.nn.Module):
         n_levels = 16
         n_features_per_level = 2
         per_level_scale = 1.447269237440378
-        
+
         self.encoding = tcnn.Encoding(
             n_input_dims=self.n_input_dims,
             encoding_config={
