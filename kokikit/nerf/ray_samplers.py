@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Callable, Optional, Sequence, Tuple, List, Literal, Iterator
+from typing import TYPE_CHECKING, Callable, Optional, Sequence, Tuple, List, Literal, Iterator, Dict, Any
 if TYPE_CHECKING:
     from torch import Tensor
     from .nerf_fields import NeRFField
@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 import torch
 import math
 import numpy as np
-import itertools
+import nerfacc
 
 from ..utils.const import *
 from ..utils.utils import is_normalized
@@ -202,6 +202,25 @@ class RaySamples:
         )
 
 
+class NeRFAccSamples():
+
+    def __init__(
+        self,
+        ray_indices: Tensor,
+        t_starts: Tensor,
+        t_ends: Tensor,
+        t_origins: Tensor,
+        t_dirs: Tensor,
+        positions: Tensor,
+    ) -> None:
+        self.ray_indices = ray_indices
+        self.t_starts = t_starts
+        self.t_ends = t_ends
+        self.t_origins = t_origins
+        self.t_dirs = t_dirs
+        self.positions = positions
+
+
 class Sampler(torch.nn.Module):
 
     def __init__(self) -> None:
@@ -209,10 +228,25 @@ class Sampler(torch.nn.Module):
 
     def to_device(self, device: torch.device):
         # Sampler will read device from ray_bundle
-        return self
+        try:
+            next(self.parameters())
+            raise NotImplementedError
+            # the model has parameters
+        except StopIteration:
+            # the model has no parameters
+            return self
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        groups = []
+        for name, module in self.named_children():
+            if hasattr(module, 'parameter_groups'):
+                groups.extend(module.parameter_groups(lr=lr))
+            else:
+                groups.append({'params': module.parameters(), 'lr': lr})
+        return groups
 
     def parameters(self) -> Iterator[torch.nn.Parameter]:
-        return iter([])
+        return super().parameters()
 
     def get_ray_samples(
         self,
@@ -220,6 +254,163 @@ class Sampler(torch.nn.Module):
         num_samples: int,
     ) -> RaySamples:
         raise NotImplementedError
+
+
+class NeRFAccSampler(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def to_device(self, device: torch.device):
+        # Sampler will read device from ray_bundle
+        try:
+            next(self.parameters())
+            raise NotImplementedError
+            # the model has parameters
+        except StopIteration:
+            # the model has no parameters
+            return self
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        groups = []
+        for name, module in self.named_children():
+            if hasattr(module, 'parameter_groups'):
+                groups.extend(module.parameter_groups(lr=lr))
+            else:
+                groups.append({'params': module.parameters(), 'lr': lr})
+        return groups
+
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
+        return super().parameters()
+
+    def get_ray_samples(
+        self,
+        ray_bundle: RayBundle,
+        density_fn: Callable,
+    ) -> NeRFAccSamples:
+        raise NotImplementedError
+
+
+class ThreestudioAccSampler(NeRFAccSampler):
+
+    def __init__(
+        self,
+        aabb_scale: int = 1,
+        resolution: int = 32,
+        levels: int = 1,
+        grid_prune: bool = True,
+        prune_alpha_threshold: bool = True,
+        stratified: bool = False,
+        num_samples_per_ray: int = 512,
+        radius: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.grid_prune = grid_prune
+        self.prune_alpha_threshold = prune_alpha_threshold
+        self.stratified = stratified
+        self.render_step_size = (math.sqrt(3) * 2 * radius / num_samples_per_ray)
+
+        self.estimator = nerfacc.OccGridEstimator(roi_aabb=[
+            -aabb_scale,
+            -aabb_scale,
+            -aabb_scale,
+            aabb_scale,
+            aabb_scale,
+            aabb_scale,
+        ], resolution=resolution, levels=levels)
+
+        if not self.grid_prune:
+            self.estimator.occs.fill_(True)
+            self.estimator.binaries.fill_(True)
+    
+    def to_device(self, device: torch.device):
+        self.estimator = self.estimator.to(device)
+        return self
+
+    def callback_before(self, density_fn: Callable[[Tensor], Tuple[Tensor, Tensor]]) -> None:
+        self.global_step = getattr(self, 'global_step', 0)
+
+        if self.grid_prune:
+
+            def occ_eval_fn(x):
+                density, _ = density_fn(x)
+                # approximate for 1 - torch.exp(-density * self.render_step_size) based on taylor series
+                return density * self.render_step_size
+
+            self.estimator.update_every_n_steps(step=self.global_step, occ_eval_fn=occ_eval_fn)
+
+        self.global_step += 1
+
+    def callback_after(self) -> None:
+        pass
+
+    def get_ray_samples(
+        self,
+        ray_bundle: RayBundle,
+        density_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
+    ) -> NeRFAccSamples:
+        self.callback_before(density_fn=density_fn) # WARNING: assuming 1 sampling per step
+        # WARNING: assume training
+
+        assert ray_bundle.directions is not None
+        rays_o_flatten = ray_bundle.origins.reshape(-1, 3) # [BHW, 3]
+        rays_d_flatten = ray_bundle.directions.reshape(-1, 3) # [BHW, 3]
+        
+        def sigma_fn(t_starts: Tensor, t_ends: Tensor, ray_indices: Tensor):
+            t_starts, t_ends = t_starts[..., None], t_ends[..., None]
+            t_origins = rays_o_flatten[ray_indices]
+            t_positions = (t_starts + t_ends) / 2.0
+            t_dirs = rays_d_flatten[ray_indices]
+            positions = t_origins + t_dirs * t_positions
+            sigma = density_fn(positions)[0][..., 0]
+            return sigma
+
+        if not self.grid_prune:
+            with torch.no_grad():
+                ray_indices, t_starts_, t_ends_ = self.estimator.sampling(
+                    rays_o_flatten,
+                    rays_d_flatten,
+                    sigma_fn=None,
+                    render_step_size=self.render_step_size,
+                    alpha_thre=0.0,
+                    stratified=self.stratified,
+                    cone_angle=0.0,
+                    early_stop_eps=0,
+                )
+        else:
+            with torch.no_grad():
+                ray_indices, t_starts_, t_ends_ = self.estimator.sampling(
+                    rays_o_flatten,
+                    rays_d_flatten,
+                    sigma_fn=sigma_fn if self.prune_alpha_threshold else None,
+                    render_step_size=self.render_step_size,
+                    alpha_thre=0.01 if self.prune_alpha_threshold else 0.0,
+                    stratified=self.stratified,
+                    cone_angle=0.0,
+                )
+
+        if ray_indices.nelement() == 0:
+            ray_indices = torch.LongTensor([0]).to(ray_indices)
+            t_starts_ = torch.Tensor([0]).to(ray_indices)
+            t_ends_ = torch.Tensor([0]).to(ray_indices)
+
+        ray_indices = ray_indices.long()
+        t_starts = t_starts_.unsqueeze(-1)
+        t_ends = t_ends_.unsqueeze(-1)
+        t_origins = rays_o_flatten[ray_indices]
+        t_dirs = rays_d_flatten[ray_indices]
+        positions = t_origins + t_dirs * ((t_starts + t_ends) / 2.0)
+
+        self.callback_after() # WARNING: assuming 1 sampling per step
+
+        return NeRFAccSamples(
+            ray_indices=ray_indices, # [R]
+            t_starts=t_starts, # [R, 1]
+            t_ends=t_ends, # [R, 1]
+            t_origins=t_origins, # [R, 3]
+            t_dirs=t_dirs, # [R, 3]
+            positions=positions, # [R, 3]
+        )
 
 
 class DreamfusionSampler(Sampler):
@@ -512,9 +703,6 @@ class ProposalNetworkSampler(Sampler):
     def to_device(self, device: torch.device):
         self.proposal_networks = [proposal_network.to(device) for proposal_network in self.proposal_networks]
         return self
-
-    def parameters(self) -> Iterator[torch.nn.Parameter]:
-        return itertools.chain(*[proposal_network.parameters() for proposal_network in self.proposal_networks])
 
     def callback_before(self) -> None:
         # https://arxiv.org/pdf/2111.12077.pdf eq. 18

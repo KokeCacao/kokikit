@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from inspect import isfunction
 from torch import nn, einsum, Tensor
-from torch.amp.autocast_mode import autocast
+from torch.cuda.amp.autocast_mode import autocast
 from einops import rearrange, repeat
 from typing import Optional, Any
 
@@ -151,7 +151,7 @@ class CrossAttention(nn.Module):
 
         # force cast to fp32 to avoid overflowing
         if _ATTN_PRECISION == "fp32":
-            with autocast(enabled=False, device_type='cuda'):
+            with autocast(enabled=False):
                 q, k = q.float(), k.float()
                 sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
         else:

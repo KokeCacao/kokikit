@@ -7,13 +7,15 @@ except EnvironmentError as e:
     warnings.warn(f"WARNING: {e}\nThis error is fine for CPU-only mode.", ImportWarning)
 
 from enum import Enum, auto
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Tuple, Union
 from torch import Tensor
+from torch.nn.parameter import Parameter
+from torch.cuda.amp.autocast_mode import autocast
 from typing_extensions import Literal
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
 from ..utils.const import *
-from .ray_samplers import RaySamples
+from .ray_samplers import RaySamples, NeRFAccSamples
 from .renderers import SHRenderer
 from .density_inits import DensityInit
 
@@ -59,11 +61,13 @@ class MLP(torch.nn.Module):
         self.net = torch.nn.ModuleList(net)
 
     def forward(self, x):
-        for l in range(self.num_layers):
-            x = self.net[l](x)
-            if l != self.num_layers - 1:
-                x = torch.nn.functional.relu(x, inplace=True)
-        return x
+        # TODO: figure out why this is needed for having gradient
+        with autocast(enabled=False):
+            for l in range(self.num_layers):
+                x = self.net[l](x)
+                if l != self.num_layers - 1:
+                    x = torch.nn.functional.relu(x, inplace=True)
+            return x
 
 
 class NeRFField(torch.nn.Module):
@@ -83,10 +87,68 @@ class NeRFField(torch.nn.Module):
     def forward(self, ray_samples: RaySamples) -> Tuple[Tensor, Tensor]:
         raise NotImplementedError
 
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        groups = []
+        for name, module in self.named_children():
+            if hasattr(module, 'parameter_groups'):
+                groups.extend(module.parameter_groups(lr=lr))
+            else:
+                groups.append({'params': module.parameters(), 'lr': lr})
+        return groups
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return super().parameters(recurse)
+
+
+class SHMLPBackground(torch.nn.Module):
+
+    def __init__(self, color_activation: Union[torch.nn.Module, Callable[..., Any]], *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.n_output_dims = 3
+        self.encoder = tcnn.Encoding(
+            n_input_dims=3,
+            encoding_config={
+                "otype": "SphericalHarmonics",
+                "degree": 3,
+            },
+            dtype=torch.float32, # ENHANCE: default float16 seems unstable...
+        )
+        self.mlp = MLP(
+            dim_in=self.encoder.n_output_dims,
+            dim_out=self.n_output_dims,
+            dim_hidden=16,
+            num_layers=3,
+            bias=False,
+        )
+        self.color_activation = color_activation
+    
+    def to_device(self, device: torch.device):
+        self.encoder = self.encoder.to(device)
+        self.mlp = self.mlp.to(device)
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        return [{
+            'params': self.encoder.parameters(),
+            'lr': lr * 0.1,
+        }, {
+            'params': self.mlp.parameters(),
+            'lr': lr * 0.1,
+        }]
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return super().parameters(recurse)
+
+    def forward(self, dirs: Tensor) -> Tensor:
+        dirs = (dirs + 1.0) / 2.0 # (-1, 1) => (0, 1)
+        dirs_embd = self.encoder(dirs.reshape(-1, 3)) # WARNING: not sure RuntimeError: view size is not compatible with input tensor's size and stride (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
+        color = self.mlp(dirs_embd).view(*dirs.shape[:-1], self.n_output_dims)
+        color = self.color_activation(color)
+        return color
+
 
 class TCNNWithMLP(torch.nn.Module):
 
-    def __init__(self, dim, n_levels, n_features_per_level, base_res, target_res, grid_output_dim, *args, **kwargs):
+    def __init__(self, dim, n_levels, n_features_per_level, base_res, target_res, grid_output_dim, interpolation, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # When using 2nd derivative, FullyFusedMLP will cause the following error. We avoid it using MLP instead.
         # File ".../lib/python3.8/site-packages/tinycudann/modules.py", line 145, in backward
@@ -100,7 +162,7 @@ class TCNNWithMLP(torch.nn.Module):
                 "n_features_per_level": n_features_per_level,
                 "log2_hashmap_size": 19,
                 "base_resolution": base_res,
-                "interpolation": "Smoothstep",
+                "interpolation": interpolation,
                 "per_level_scale": np.exp2(np.log2(target_res / base_res) / (n_levels - 1)),
             },
             dtype=torch.float32, # ENHANCE: default float16 seems unstable...
@@ -111,6 +173,18 @@ class TCNNWithMLP(torch.nn.Module):
         x = self.encoder(x)
         x = self.mlp(x)
         return x
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        return [{
+            'params': self.encoder.parameters(),
+            'lr': lr,
+        }, {
+            'params': self.mlp.parameters(),
+            'lr': lr * 0.1,
+        }]
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return super().parameters(recurse)
 
 
 class FARTNeRFField(NeRFField):
@@ -148,26 +222,6 @@ class FARTNeRFField(NeRFField):
         n_features_per_level = 2
 
         try:
-            # self.composed = tcnn.NetworkWithInputEncoding(
-            #     n_input_dims=self.dim,
-            #     n_output_dims=self.grid_output_dim,
-            #     encoding_config={
-            #         "otype": "HashGrid", # HashGrid has detailed texture, but has "white border" artifacts compared to DenseGrid
-            #         "n_levels": n_levels,
-            #         "n_features_per_level": n_features_per_level,
-            #         "log2_hashmap_size": 19,
-            #         "base_resolution": base_res,
-            #         "interpolation": interpolation,
-            #         "per_level_scale": np.exp2(np.log2(target_res / base_res) / (n_levels - 1)),
-            #     },
-            #     network_config={
-            #         "otype": "FullyFusedMLP",
-            #         "activation": "ReLU",
-            #         "output_activation": "None",
-            #         "n_neurons": ((self.grid_output_dim + 15) // 16) * 16, # May only be 16, 32, 64, or 128.
-            #         "n_hidden_layers": 1,
-            #     },
-            # )
             self.composed = TCNNWithMLP(
                 dim=self.dim,
                 n_levels=n_levels,
@@ -175,6 +229,7 @@ class FARTNeRFField(NeRFField):
                 base_res=base_res,
                 target_res=target_res,
                 grid_output_dim=self.grid_output_dim,
+                interpolation=interpolation,
             )
         except NameError as e:
             self.composed = torch.nn.Linear(1, 1) # dummy
@@ -286,3 +341,127 @@ class FARTNeRFField(NeRFField):
         assert torch.isfinite(colors).all(), f"colors is not finite: {colors}"
         # density is allowed to contain inf
         return colors.reshape(*BHW, N, -1), densities.reshape(*BHW, N, -1) # [B, H, W, num_samples, C], [B, H, W, num_samples, 1]
+
+
+def scale_tensor(x: Tensor, inp_scale, tgt_scale):
+    x = (x - inp_scale[0]) / (inp_scale[1] - inp_scale[0])
+    x = x * (tgt_scale[1] - tgt_scale[0]) + tgt_scale[0]
+    x = x.clamp(tgt_scale[0], tgt_scale[1])
+    return x
+
+
+def contract_to_unisphere(x: Tensor, bbox: Tensor) -> Tensor:
+    return scale_tensor(x, bbox, (0, 1))
+
+
+class NeRFAccField(torch.nn.Module):
+
+    def __init__(
+            self,
+            density_init: DensityInit,
+            density_activation: Union[torch.nn.Module, Callable[..., Any]],
+            color_activation: Union[torch.nn.Module, Callable[..., Any]],
+            interpolation: Literal["Nearest", "Linear", "Smoothstep"],
+            bbox: Tensor = torch.tensor([[-1, -1, -1], [1, 1, 1]], dtype=torch.float32),
+            *args,
+            **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.density_init = density_init
+        self.density_activation = density_activation
+        self.color_activation = color_activation
+
+        self.n_input_dims = 3
+        self.n_feature_dims = 3
+        self.bbox = bbox # [2, 3] e.g. [[-1, -1, -1], [1, 1, 1]]
+
+        # STORAGE
+        base_res = 16
+        n_levels = 16
+        n_features_per_level = 2
+        per_level_scale = 1.447269237440378
+        
+        self.encoding = tcnn.Encoding(
+            n_input_dims=self.n_input_dims,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": n_levels,
+                "n_features_per_level": n_features_per_level,
+                "log2_hashmap_size": 19,
+                "base_resolution": base_res,
+                "interpolation": interpolation,
+                "per_level_scale": per_level_scale,
+            },
+            dtype=torch.float32, # ENHANCE: default float16 seems unstable...
+        )
+        self.feature_network = MLP(
+            dim_in=self.encoding.n_output_dims,
+            dim_out=self.n_feature_dims,
+            dim_hidden=64,
+            num_layers=2,
+            bias=False,
+        )
+        self.density_network = MLP(
+            dim_in=self.encoding.n_output_dims,
+            dim_out=1,
+            dim_hidden=64,
+            num_layers=2,
+            bias=False,
+        )
+
+    def to_device(self, device: torch.device):
+        self.bbox = self.bbox.to(device)
+        self.feature_network = self.feature_network.to(device)
+        self.density_network = self.density_network.to(device)
+        self.encoding = self.encoding.to(device)
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        return [{
+            'params': self.encoding.parameters(),
+            'lr': lr,
+        }, {
+            'params': self.feature_network.parameters(),
+            'lr': lr * 0.1,
+        }, {
+            'params': self.density_network.parameters(),
+            'lr': lr * 0.1,
+        }]
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return super().parameters(recurse)
+
+    def get_density(self, points: Tensor) -> Tuple[Tensor, Tensor]:
+        points_unscaled = points
+        points = contract_to_unisphere(
+            points, # [..., 3]
+            self.bbox, # [2, 3]
+        ) # points normalized to (0, 1) # [..., 3]
+        enc = self.encoding(points.view(-1, self.n_input_dims))
+        density = self.density_network(enc).view(*points.shape[:-1], 1)
+        density = self.get_activated_density(points_unscaled, density)
+        return density, enc
+
+    def get_color(self, directions: Tensor, color_feature: Tensor) -> Tensor:
+        raise NotImplementedError
+
+    def get_activated_density(self, points: Tensor, density: Tensor) -> Tensor:
+        density = self.density_init.edit_density(density, points)
+        return self.density_activation(density)
+
+    def forward(self, ray_samples: NeRFAccSamples) -> Tuple[Tensor, Tensor]:
+        points = ray_samples.positions
+
+        # SAME AS GET DENSITY, BUT DON'T MERGE AS IT CONTRACT POINTS
+        points_unscaled = points
+        points = contract_to_unisphere(
+            points, # [..., 3]
+            self.bbox, # [2, 3]
+        ) # points normalized to (0, 1) # [..., 3]
+        enc = self.encoding(points.view(-1, self.n_input_dims))
+        density = self.density_network(enc).view(*points.shape[:-1], 1)
+        density = self.get_activated_density(points_unscaled, density)
+        # SAME AS GET DENSITY, BUT DON'T MERGE AS IT CONTRACT POINTS
+
+        assert self.n_feature_dims > 0
+        features = self.feature_network(enc).view(*points.shape[:-1], self.n_feature_dims)
+        return self.color_activation(features), density

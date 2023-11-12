@@ -43,6 +43,18 @@ class DreamfusionDensityInit(DensityInit):
         return densities + blob
 
 
+class Magic3DDensityInit(DensityInit):
+
+    def __init__(self, density_blob_scale: float, density_blob_std: float) -> None:
+        super().__init__()
+        self.density_blob_scale = density_blob_scale
+        self.density_blob_std = density_blob_std
+
+    def edit_density(self, densities: Tensor, original_positions: Tensor) -> Tensor:
+        positions_radius = torch.linalg.norm(original_positions.reshape(-1, 3), ord=2, dim=-1) # [N,]
+        return densities + (self.density_blob_scale * (1 - positions_radius / self.density_blob_std).unsqueeze(-1))
+
+
 class EmptyDensityInit(DensityInit):
 
     def __init__(self, additive_density: float) -> None:

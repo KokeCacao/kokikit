@@ -3,7 +3,7 @@ import torch
 import math
 import numpy as np
 
-from typing import Optional, Any, Sequence, List
+from typing import Optional, Any, Sequence, List, Dict
 from torch import Tensor
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
@@ -554,6 +554,9 @@ class Gaussian(FieldBase):
         self.radii = radii
 
     def to_device(self, device: torch.device):
+        raise NotImplementedError
+    
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
     def parameters(self):

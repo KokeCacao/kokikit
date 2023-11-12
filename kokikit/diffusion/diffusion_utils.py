@@ -10,7 +10,7 @@ from diffusers.models.attention_processor import (
     SlicedAttnAddedKVProcessor,
 )
 from diffusers import DDIMScheduler
-from typing import Dict, Union, List, Optional, Any, Callable
+from typing import Dict, Union, List, Optional, Tuple, Callable
 
 
 def extract_lora_diffusers(unet: UNet2DConditionModel) -> Dict[str, Union[LoRAAttnAddedKVProcessor, LoRAAttnProcessor]]:
@@ -92,6 +92,18 @@ def guidance(unconditional: Tensor, conditional: Tensor, cfg: float):
     return unconditional + cfg * (conditional - unconditional)
 
 
+def cfg_rescale_x0(cfg_rescale: float, noise_pred_x0: Tensor, noise_pred_conditional: Tensor, latents_noised: Tensor, scheduler: DDIMScheduler, t: Tensor, n_views: int = 1, eps: float = 1e-8) -> Tensor:
+    if cfg_rescale > 0 and cfg_rescale < 1:
+        noise_pred_x0 = noise_pred_x0.view(-1, n_views, *noise_pred_x0.shape[1:]) # [B, n_view, C, H, W]
+        noise_pred_conditional_x0: Tensor = scheduler.step(noise_pred_conditional, t, latents_noised).pred_original_sample # type: ignore
+        noise_pred_conditional_x0 = noise_pred_conditional_x0.view(-1, n_views, *noise_pred_conditional_x0.shape[1:]) # [B, n_view, C, H, W]
+        conditional_vs_cfg = (noise_pred_conditional_x0.std([1, 2, 3, 4], keepdim=True) + eps) / (noise_pred_x0.std([1, 2, 3, 4], keepdim=True) + eps) # [B, 1, 1, 1, 1]
+        conditional_vs_cfg = conditional_vs_cfg.squeeze(1).repeat_interleave(n_views, dim=0) # [B*n_view, 1, 1, 1]
+        noise_pred_x0 = noise_pred_x0.view(-1, *noise_pred_x0.shape[2:]) # [B*n_view, C, H, W]
+        noise_pred_x0 = cfg_rescale * (noise_pred_x0 * conditional_vs_cfg) + (1 - cfg_rescale) * noise_pred_x0 # [B*n_view, C, H, W]
+    return noise_pred_x0
+
+
 def get_prependicualr_component(x: Tensor, y: Tensor) -> Tensor:
     assert x.shape == y.shape
     return x - ((torch.mul(x, y).sum()) / (torch.norm(y)**2)) * y
@@ -114,13 +126,13 @@ def predict_noise_sd( # for any stable-diffusion-based models
         latents_noised: Tensor,
         text_embeddings_conditional: Tensor,
         text_embeddings_unconditional: Tensor,
-        text_embeddings_perpneg: Optional[List[Tensor]], # List[77, 1024]
-        weights_perpneg: Optional[List[float]], # List[float]
         cfg: float,
         lora_scale: float, # > 0 to enable lora
         t: Tensor,
         scheduler: DDIMScheduler,
-) -> Tensor:
+        reconstruction_loss: bool,
+        cfg_rescale: float,
+) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
@@ -137,31 +149,23 @@ def predict_noise_sd( # for any stable-diffusion-based models
 
     # cfg
     noise_pred_conditional, noise_pred_unconditional = noise_pred.chunk(2)
+    noise_pred = guidance(unconditional=noise_pred_unconditional, conditional=noise_pred_conditional, cfg=cfg)
 
-    if text_embeddings_perpneg is not None and weights_perpneg is not None and len(text_embeddings_perpneg) > 0:
-        pred_perpneg = unet_sd(
-            torch.cat([latents_noised] * len(text_embeddings_perpneg), dim=0),
-            t,
-            encoder_hidden_states=torch.cat(text_embeddings_perpneg, dim=0),
-            cross_attention_kwargs={
-                'scale': lora_scale
-            } if lora_scale > 0 else {},
-        ).sample
+    # reconstruction loss
+    if not reconstruction_loss:
+        return noise_pred, None
 
-        pred_perpneg = pred_perpneg - noise_pred_unconditional
-        noise_pred_conditional = noise_pred_conditional - noise_pred_unconditional
+    noise_pred_x0: Tensor = scheduler.step(noise_pred, t, latents_noised).pred_original_sample # [B*n_view, C, H, W] # type: ignore
+    noise_pred_x0 = cfg_rescale_x0(
+        cfg_rescale=cfg_rescale,
+        noise_pred_x0=noise_pred_x0,
+        noise_pred_conditional=noise_pred_conditional,
+        latents_noised=latents_noised,
+        scheduler=scheduler,
+        t=t,
+    ) # cfg rescale
 
-        noise_pred = guidance_perpneg(
-            unconditional=noise_pred_unconditional,
-            conditional=noise_pred_conditional,
-            cfg=cfg,
-            pred_perpneg=pred_perpneg,
-            weights_perpneg=weights_perpneg,
-        )
-    else:
-        noise_pred = guidance(unconditional=noise_pred_unconditional, conditional=noise_pred_conditional, cfg=cfg)
-
-    return noise_pred
+    return noise_pred, noise_pred_x0
 
 
 def predict_noise_z123( # for any z123-based models
@@ -174,7 +178,9 @@ def predict_noise_z123( # for any z123-based models
         lora_scale: float, # > 0 to enable lora
         t: Tensor,
         scheduler: DDIMScheduler,
-) -> Tensor:
+        reconstruction_loss: bool,
+        cfg_rescale: float,
+) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
@@ -193,7 +199,21 @@ def predict_noise_z123( # for any z123-based models
     noise_pred_conditional, noise_pred_unconditional = noise_pred.chunk(2)
     noise_pred = guidance(unconditional=noise_pred_unconditional, conditional=noise_pred_conditional, cfg=cfg)
 
-    return noise_pred
+    # reconstruction loss
+    if not reconstruction_loss:
+        return noise_pred, None
+
+    noise_pred_x0: Tensor = scheduler.step(noise_pred, t, latents_noised).pred_original_sample # [B*n_view, C, H, W] # type: ignore
+    noise_pred_x0 = cfg_rescale_x0(
+        cfg_rescale=cfg_rescale,
+        noise_pred_x0=noise_pred_x0,
+        noise_pred_conditional=noise_pred_conditional,
+        latents_noised=latents_noised,
+        scheduler=scheduler,
+        t=t,
+    ) # cfg rescale
+
+    return noise_pred, noise_pred_x0
 
 
 def predict_noise_mvdream(
@@ -205,7 +225,10 @@ def predict_noise_mvdream(
     cfg: float,
     t: Tensor,
     scheduler: DDIMScheduler,
-) -> Tensor:
+    n_views: int,
+    reconstruction_loss: bool,
+    cfg_rescale: float,
+) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
@@ -226,7 +249,22 @@ def predict_noise_mvdream(
     noise_pred_conditional, noise_pred_unconditional = noise_pred.chunk(2)
     noise_pred = guidance(unconditional=noise_pred_unconditional, conditional=noise_pred_conditional, cfg=cfg)
 
-    return noise_pred
+    # reconstruction loss
+    if not reconstruction_loss:
+        return noise_pred, None
+
+    noise_pred_x0: Tensor = scheduler.step(noise_pred, t, latents_noised).pred_original_sample # [B*n_view, C, H, W] # type: ignore
+    noise_pred_x0 = cfg_rescale_x0(
+        cfg_rescale=cfg_rescale,
+        noise_pred_x0=noise_pred_x0,
+        noise_pred_conditional=noise_pred_conditional,
+        latents_noised=latents_noised,
+        scheduler=scheduler,
+        t=t,
+        n_views=n_views,
+    ) # cfg rescale
+
+    return noise_pred, noise_pred_x0
 
 
 def predict_velocity_lora(

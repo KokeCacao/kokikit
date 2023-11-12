@@ -37,7 +37,7 @@ class RandomTimeScheduler(TimeScheduler):
 
 class RandomDecayTimeScheduler(TimeScheduler):
 
-    def __init__(self, scheduler_scale: int, t_min_start: float, t_max_start: float, t_min_end: float, t_max_end: float) -> None:
+    def __init__(self, scheduler_scale: int, t_min_start: float, t_max_start: float, t_min_end: float, t_max_end: float, t_start_at: float, t_end_at: float) -> None:
         super().__init__(scheduler_scale)
         self.t_min_start: int = math.ceil(t_min_start * scheduler_scale) + 1
         self.t_max_start: int = math.floor(t_max_start * scheduler_scale) + 1
@@ -45,10 +45,15 @@ class RandomDecayTimeScheduler(TimeScheduler):
         self.t_max_end: int = math.floor(t_max_end * scheduler_scale) + 1
         assert 1 <= self.t_min_start < self.t_max_start <= scheduler_scale
         assert 1 <= self.t_min_end < self.t_max_end <= scheduler_scale
+        
+        self.t_start_at: float = t_start_at
+        self.t_end_at: float = t_end_at
 
     def get_times(self, i: Tensor) -> Tensor:
-        t_min = self.t_min_start + (self.t_min_end - self.t_min_start) * i.to(dtype=torch.float) / i.shape[0]
-        t_max = self.t_max_start + (self.t_max_end - self.t_max_start) * i.to(dtype=torch.float) / i.shape[0]
+        percentage = (i.to(dtype=torch.float) / i.shape[0] - self.t_start_at) / (self.t_end_at - self.t_start_at)
+        percentage = percentage.clamp(0.0, 1.0)
+        t_min = self.t_min_start + (self.t_min_end - self.t_min_start) * percentage
+        t_max = self.t_max_start + (self.t_max_end - self.t_max_start) * percentage
         # torch.randint(low=t_min, high=t_max + 1, size=(i.shape[0],), dtype=torch.long)
 
         t_min_np = t_min.to(dtype=torch.long).tolist()

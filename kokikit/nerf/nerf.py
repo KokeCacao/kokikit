@@ -1,6 +1,7 @@
 import warnings
 import torch
 import itertools
+import nerfacc
 
 from torch import Tensor
 from typing import Optional, Literal, Sequence, Tuple, Iterator, List
@@ -9,9 +10,9 @@ from torch.cuda.amp.autocast_mode import autocast
 from ..utils.utils import safe_normalize
 from .field_base import FieldBase
 from .rays import RayBundle
-from .ray_samplers import Sampler, RaySamples, UniformSampler, PDFSampler, ProposalNetworkSampler
+from .ray_samplers import Sampler, NeRFAccSampler, RaySamples, NeRFAccSamples, UniformSampler, PDFSampler, ProposalNetworkSampler
 from .renderers import NeRFRenderer, RGBRenderer, RGBMaxRenderer, DepthRenderer, DeltaDepthRenderer, AccumulationRenderer, NormalRenderer, TexturelessRenderer, LambertianRenderer, NormalAlignmentRenderer
-from .nerf_fields import NeRFField
+from .nerf_fields import NeRFField, NeRFAccField, SHMLPBackground
 
 
 class TemporaryGrad():
@@ -26,6 +27,114 @@ class TemporaryGrad():
     def __exit__(self, type, value, traceback):
         self.variable.requires_grad = self.original_requires_grad
 
+
+class AccNeRF(FieldBase):
+
+    def __init__(
+        self,
+        latent_dreamfusion: bool,
+        degree_latent: int,
+        sampler: NeRFAccSampler,
+        nerf_field: NeRFAccField,
+        background_field: SHMLPBackground,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        super().__init__(
+            latent_dreamfusion=latent_dreamfusion,
+            degree_latent=degree_latent,
+            dtype=dtype,
+            device=device,
+        )
+        self.sampler: NeRFAccSampler = sampler
+        self.nerf_field: NeRFAccField = nerf_field
+        self.background_field: SHMLPBackground = background_field
+
+    def to_device(self, device: torch.device):
+        self.sampler.to_device(device)
+        self.nerf_field.to_device(device)
+        self.background_field.to_device(device)
+        return self
+
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
+        return itertools.chain(self.nerf_field.parameters(), self.sampler.parameters(), self.background_field.parameters())
+
+    def _forward(self, ray_bundle: RayBundle, renderers: Sequence[NeRFRenderer]) -> Tuple[List[Tensor], List[Tensor]]:
+        # translate ray_bundle to ray_samples
+        assert ray_bundle.origins.shape[-1] == 3, f"ray_bundle.origins.shape[-1]={ray_bundle.origins.shape[-1]}"
+        assert ray_bundle.directions is not None
+        B, H, W = ray_bundle.origins.shape[:3]
+
+        ray_samples: NeRFAccSamples
+        n_rays: int
+        if isinstance(self.sampler, NeRFAccSampler):
+            ray_samples = self.sampler.get_ray_samples(ray_bundle=ray_bundle, density_fn=self.nerf_field.get_density)
+            n_rays = ray_bundle.origins.shape[0] * ray_bundle.origins.shape[1] * ray_bundle.origins.shape[2]
+        else:
+            raise ValueError(f"Unknown sampler type: {type(self.sampler)}")
+        
+        rgb_fg_all, density = self.nerf_field.forward(ray_samples=ray_samples)
+        comp_rgb_bg = self.background_field(dirs=ray_bundle.directions) # [B, H, W, 3]
+        
+        weights_, _, _ = nerfacc.render_weight_from_density(
+            ray_samples.t_starts[..., 0],
+            ray_samples.t_ends[..., 0],
+            density[..., 0],
+            ray_indices=ray_samples.ray_indices,
+            n_rays=n_rays,
+        )
+        weights = weights_[..., None]
+        opacity = nerfacc.accumulate_along_rays(
+            weights[..., 0], values=None, ray_indices=ray_samples.ray_indices, n_rays=n_rays
+        )
+        depth = nerfacc.accumulate_along_rays(
+            weights[..., 0], values=((ray_samples.t_starts + ray_samples.t_ends) / 2.0), ray_indices=ray_samples.ray_indices, n_rays=n_rays
+        )
+        comp_rgb_fg = nerfacc.accumulate_along_rays(
+            weights[..., 0], values=rgb_fg_all, ray_indices=ray_samples.ray_indices, n_rays=n_rays
+        )
+
+        # populate depth and opacity to each point
+        t_depth = depth[ray_samples.ray_indices]
+        z_variance = nerfacc.accumulate_along_rays(
+            weights[..., 0],
+            values=(((ray_samples.t_starts + ray_samples.t_ends) / 2.0) - t_depth) ** 2,
+            ray_indices=ray_samples.ray_indices,
+            n_rays=n_rays,
+        )
+
+        bg_color = comp_rgb_bg
+        if bg_color.shape[:-1] == (B, H, W):
+            bg_color = bg_color.reshape(B * H * W, -1)
+
+        comp_rgb = comp_rgb_fg + bg_color * (1.0 - opacity)
+        
+        # out = {
+        #     "comp_rgb": comp_rgb.view(B, H, W, -1),
+        #     "comp_rgb_fg": comp_rgb_fg.view(B, H, W, -1),
+        #     "comp_rgb_bg": comp_rgb_bg.view(B, H, W, -1),
+        #     "opacity": opacity.view(B, H, W, 1),
+        #     "depth": depth.view(B, H, W, 1),
+        #     "z_variance": z_variance.view(B, H, W, 1),
+        #     # "weights": weights,
+        #     # "t_points": ((ray_samples.t_starts + ray_samples.t_ends) / 2.0),
+        #     # "t_dirs": ray_samples.t_dirs,
+        #     # "ray_indices": ray_samples.ray_indices,
+        #     # "points": ray_samples.positions,
+        # }
+        
+        # calculate [images]
+        images: List[Tensor] = [] # List[B, H, W, ?]
+        losses: List[Tensor] = [] # List[?]
+        for i, renderer in enumerate(renderers):
+            if i == 1:
+                images.append(opacity.clamp(0, 1).view(B, H, W, 1))
+                losses.append(torch.zeros(1, device='cuda'))
+            else:
+                images.append(comp_rgb.view(B, H, W, -1))
+                losses.append(torch.zeros(1, device='cuda'))
+        return images, losses
+    
 
 class NeRF(FieldBase):
 

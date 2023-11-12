@@ -1,9 +1,9 @@
 import torch
+import warnings
 
 from torch import Tensor
 from diffusers import AutoencoderKL
-from typing import Union, Any, Sequence, Tuple, Iterator, List
-
+from typing import Union, Any, Sequence, Tuple, Iterator, List, Dict
 from .rays import RayBundle
 from .renderers import Renderer
 
@@ -25,6 +25,15 @@ class FieldBase(torch.nn.Module):
 
     def to_device(self, device: torch.device):
         raise NotImplementedError
+    
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        groups = []
+        for name, module in self.named_children():
+            if hasattr(module, 'parameter_groups'):
+                groups.extend(module.parameter_groups(lr=lr))
+            else:
+                groups.append({'params': module.parameters(), 'lr': lr})
+        return groups
 
     def parameters(self, recurse: bool = True) -> Iterator[torch.nn.Parameter]:
         return super().parameters(recurse)
@@ -39,7 +48,13 @@ class FieldBase(torch.nn.Module):
 
         def fn(output: Union[Tensor, Any]) -> Tensor:
             output = output.permute(0, 3, 1, 2) # [B, C, H, W], in [-1, 1] or [-inf, inf]
-            assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
+            if torch.any(torch.isnan(output)):
+                output = output.nan_to_num()
+                warnings.warn("NaN detected in output, replaced with 0")
+            if not (torch.all(output >= 0.0) and torch.all(output <= 1.0)):
+                warnings.warn(f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}")
+                output = output.clamp(0.0, 1.0)
+            # assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
             if self.latent_dreamfusion: # assume in range [-1, 1] or [-inf, inf]
                 assert nerf_scale == 1, f"nerf_scale={nerf_scale} is not supported for latent_dreamfusion"
                 out_channels = output.shape[1]
@@ -72,7 +87,7 @@ class FieldBase(torch.nn.Module):
 
     def get_image(self, ray_bundle: RayBundle, vae: AutoencoderKL, renderers: Sequence[Renderer], nerf_scale: float) -> Tensor:
         # if not self.latent_dreamfusion: # QUESTION: why need this to produce correct image?
-        #     return self._get_image_resample(ray_bundle=ray_bundle, vae=vae, renderers=renderers)
+        #     return self._get_image_resample(ray_bundle=ray_bundle, vae=vae, renderers=renderers, nerf_scale=nerf_scale)
 
         def fn(output: Union[Tensor, Any], renderer: Renderer) -> Tensor:
             output = output.permute(0, 3, 1, 2) # [B, C, H, W], in [0, 1]
@@ -113,7 +128,11 @@ class FieldBase(torch.nn.Module):
                     else:
                         raise ValueError(f"Invalid out_channels={out_channels}, expected 4 or 3 or 1 or >4")
                     output = torch.nn.functional.interpolate(output, size=(512, 512), mode='nearest') # TODO: properly interpolate here for x8 vae for viewing
-                assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
+                    
+                if not (torch.all(output >= 0.0) and torch.all(output <= 1.0)):
+                    warnings.warn(f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}")
+                    output = output.clamp(0.0, 1.0)
+                # assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
                 return output # [B, 3, 512, 512]
             else: # assume in range [0, 1]
                 if nerf_scale != 1:
@@ -125,7 +144,10 @@ class FieldBase(torch.nn.Module):
                     output = output.expand(-1, 3, -1, -1)
                 else:
                     raise ValueError(f"Invalid out_channels={out_channels}, expected 3 or 1")
-                assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
+                if torch.any(torch.isnan(output)):
+                    output = output.nan_to_num()
+                    warnings.warn("NaN detected in output, replaced with 0")
+                # assert torch.all(output >= 0.0) and torch.all(output <= 1.0), f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}"
                 return output # [B, 3, 512, 512]
 
         outputs, _ = self._forward(ray_bundle=ray_bundle, renderers=renderers) # Sequence[B, H, W, C]

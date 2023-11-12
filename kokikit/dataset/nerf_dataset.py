@@ -423,7 +423,8 @@ class NeRFDataset(Dataset):
         # [b1v1, b1v2, b1v3, b1v4, b2v1, b2v2, b2v3, b2v4, ...] b=batch, v=view
         radius = (torch.rand(real_batch_size, device=device) * (radius_max - radius_min) + radius_min).repeat_interleave(n_views, dim=0)
         thetas = (torch.rand(real_batch_size, device=device) * (theta_max - theta_min) + theta_min).repeat_interleave(n_views, dim=0)
-        phis = ((1.0 / 180.0) * torch.rand(real_batch_size, device=device).reshape(-1, 1) + torch.arange(n_views, device=device).reshape(1, -1)).reshape(-1) / n_views * (phi_max - phi_min) + phi_min
+        rad = torch.rand(real_batch_size, device=device).reshape(-1, 1) # 0~1 -> 0~1, 1~2, 2~3, ...
+        phis = (rad + torch.arange(n_views, device=device).reshape(1, -1)).reshape(-1) / n_views * (phi_max - phi_min) + phi_min
         phis[phis < 0] += 2 * np.pi
 
         # default view is [sin(90) * sin(0), cos(90), sin(90) * cos(0)] = [0, 0, 1]

@@ -1,7 +1,8 @@
 import nerfacc
 import torch
+import warnings
 
-from typing import Iterator, Optional, Union, Callable, Tuple
+from typing import Iterator, Optional, Union, Callable, Tuple, List, Dict, Any
 from torch import Tensor
 from typing_extensions import Literal
 from torch.nn.parameter import Parameter
@@ -33,6 +34,18 @@ class Renderer(torch.nn.Module):
             loss = self.reg.forward(x)
         return x, loss
 
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        groups = []
+        for name, module in self.named_children():
+            if hasattr(module, 'parameter_groups'):
+                groups.extend(module.parameter_groups(lr=lr))
+            else:
+                groups.append({'params': module.parameters(), 'lr': lr})
+        return groups
+
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return super().parameters(recurse)
+
 
 class ImageRenderer(Renderer):
 
@@ -61,6 +74,9 @@ class RGBRenderer(NeRFRenderer):
         super().__init__(*args, **kwargs)
         # Note that background color here is after activation (whether it's sigmoid or tanh or no activation)
         self.background_color = background_color
+
+    def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
+        return [{'params': self.parameters(), 'lr': lr * 0.1}]
 
     def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
         if type(self.background_color) == torch.nn.Parameter:
@@ -113,7 +129,9 @@ class RGBRenderer(NeRFRenderer):
         num_rays: Optional[int] = None,
     ) -> Tensor:
         rgb = self.combine_colors(colors, weights, ray_indices=ray_indices, num_rays=num_rays)
-        rgb = torch.clamp(rgb, min=min, max=max)
+        if torch.any(rgb > max) or torch.any(rgb < min):
+            warnings.warn(f"Clipping rgb values to [{min}, {max}], current range is [{rgb.min()}, {rgb.max()}]")
+            rgb = torch.clamp(rgb, min=min, max=max)
         return rgb
 
 
@@ -338,8 +356,10 @@ class AccumulationRenderer(NeRFRenderer):
             accumulation = nerfacc.accumulate_along_rays(weights, ray_indices, None, num_rays)
         else:
             accumulation = torch.sum(weights, dim=-2)
-        # TODO: add assertion here
-        accumulation = torch.clamp(accumulation, 0.0, 1.0)
+
+        if torch.any(accumulation > 1.0) or torch.any(accumulation < 0.0):
+            warnings.warn(f"Clipping accumulation values to [{0.0}, {1.0}], current range is [{accumulation.min()}, {accumulation.max()}]")
+            accumulation = torch.clamp(accumulation, 0.0, 1.0)
         return accumulation
 
 
@@ -394,8 +414,10 @@ class DepthRenderer(NeRFRenderer):
             if fars is None:
                 fars = torch.max(depth)
             depth = 1 - ((depth - nears) / (fars - nears + EPS_1E10)) # [B, H, W, 1]
-            # TODO: add accertion here
-            depth = torch.clamp(depth, 0.0, 1.0)
+
+            if torch.any(depth > 1.0) or torch.any(depth < 0.0):
+                warnings.warn(f"Clipping depth values to [{0.0}, {1.0}], current range is [{depth.min()}, {depth.max()}]")
+                depth = torch.clamp(depth, 0.0, 1.0)
         return depth
 
 
