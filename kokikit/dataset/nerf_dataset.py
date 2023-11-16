@@ -173,7 +173,6 @@ class NeRFDataset(Dataset):
         focal: float = h_latent / (2 * np.tan(fov_y / 2)) # focal length isn't very reliable due to units ambiguity
         fov_x: float = 2 * np.arctan(w_latent / (2 * focal)) # [1,]
         # assert focal == w_latent / (2 * np.tan(fov_x / 2))
-        
         rays_d = self._get_rays(
             batch_size=1,
             w_latent=w_latent, # note that we don't use config value
@@ -185,7 +184,6 @@ class NeRFDataset(Dataset):
             device=device,
         ) # [1, H, W, 3]
         rays_o = c2w[:, :3, 3] # [1, 3]
-        rays_o = rays_o[:, None, None, :].expand(-1, h_latent, w_latent, -1) # [1, H, W, 3]
         up_vector, right_vector, forward_vector = self._get_lookat(
             batch_size=1,
             rays_o=rays_o,
@@ -207,6 +205,7 @@ class NeRFDataset(Dataset):
             c2w=c2w,
         ) # [B, 4, 4]
 
+        rays_o = rays_o[:, None, None, :].expand(-1, h_latent, w_latent, -1) # [1, H, W, 3]
         return RayBundle(
             near_plane=near_plane,
             far_plane=far_plane,
