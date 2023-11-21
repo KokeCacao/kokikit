@@ -4,9 +4,10 @@ A General NeRF and Diffusion Toolkit for [KatUI](https://github.com/KokeCacao/Ka
 ## Installation
 ```bash
 # for production
-pip install .
+pip install "git+https://github.com/KokeCacao/kokikit.git"
 
 # for developers
+git clone https://github.com/KokeCacao/kokikit.git
 pip install -e .
 ```
 
