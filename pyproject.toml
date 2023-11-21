@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kokikit"
+version = "0.0.1"
+dependencies = [
+  "torch",
+  "diffusers",
+  "einops",
+  "numpy",
+  "diffusers",
+  "tinycudann @ git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch",
+  "diff_gaussian_rasterization @ git+https://github.com/ashawkey/diff-gaussian-rasterization",
+  "simple_knn @ git+https://gitlab.inria.fr/bkerbl/simple-knn",
+]
+requires-python = ">=3.8"
+authors = [{ name = "Koke_Cacao", email = "i@kokecacao.me" }]
+maintainers = [{ name = "Koke_Cacao", email = "i@kokecacao.me" }]
+description = "A General NeRF and Diffusion Toolkit for KatachiUI"
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["utility"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3 ",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+full = ["xformers", "tqdm", "rich"]
+
+[project.urls]
+Homepage = "https://github.com/KokeCacao/kokikit"
+Documentation = "https://github.com/KokeCacao/kokikit"
+Repository = "https://github.com/KokeCacao/kokikit.git"
+Issues = "https://github.com/KokeCacao/kokikit/issues"
+"Bug Tracker" = "https://github.com/KokeCacao/kokikit/issues"
+Changelog = "https://github.com/KokeCacao/kokikit/commits/master"

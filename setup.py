@@ -22,9 +22,9 @@ if __name__ == "__main__":
             "einops",
             "numpy",
             "diffusers",
-            # "git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch",
-            # "git+https://github.com/ashawkey/diff-gaussian-rasterization"
-            # "git+https://gitlab.inria.fr/bkerbl/simple-knn"
+            "tinycudann @ git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch",
+            "diff_gaussian_rasterization @ git+https://github.com/ashawkey/diff-gaussian-rasterization",
+            "simple_knn @ git+https://gitlab.inria.fr/bkerbl/simple-knn",
         ],
         extras_require={
             "full": [
