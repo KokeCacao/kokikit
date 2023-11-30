@@ -220,7 +220,7 @@ class LambertianRenderer(RGBRenderer):
 
     def __init__(self, ambient: float, background_color: Union[Literal["random", "last_sample", "black"], Tensor], *args, **kwargs) -> None:
         super().__init__(background_color=background_color, *args, **kwargs)
-        self.ambient = ambient
+        self.ambient = ambient # ambient light intensity (0~1)
 
     def forward(
         self,

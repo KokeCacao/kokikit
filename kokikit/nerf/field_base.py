@@ -3,7 +3,7 @@ import warnings
 
 from torch import Tensor
 from diffusers import AutoencoderKL
-from typing import Union, Any, Sequence, Tuple, Iterator, List, Dict
+from typing import Union, Any, Sequence, Tuple, Iterator, List, Dict, Optional
 from .rays import RayBundle
 from .renderers import Renderer
 
@@ -25,7 +25,7 @@ class FieldBase(torch.nn.Module):
 
     def to_device(self, device: torch.device):
         raise NotImplementedError
-    
+
     def parameter_groups(self, lr: float) -> List[Dict[str, Any]]:
         groups = []
         for name, module in self.named_children():
@@ -85,7 +85,10 @@ class FieldBase(torch.nn.Module):
         outputs, reg_losses = self._forward(ray_bundle=ray_bundle, renderers=renderers) # Sequence[B, H, W, C], Sequence[?]
         return torch.stack([fn(output) for output in outputs], dim=0), reg_losses # [R, B, 4, 64, 64]
 
-    def get_image(self, ray_bundle: RayBundle, vae: AutoencoderKL, renderers: Sequence[Renderer], nerf_scale: float) -> Tensor:
+    def get_image(self, ray_bundle: RayBundle, vae: Optional[AutoencoderKL], renderers: Sequence[Renderer], nerf_scale: float) -> Tensor:
+        if self.latent_dreamfusion and vae is None:
+            raise ValueError("vae must be provided when latent_dreamfusion is True")
+
         # if not self.latent_dreamfusion: # QUESTION: why need this to produce correct image?
         #     return self._get_image_resample(ray_bundle=ray_bundle, vae=vae, renderers=renderers, nerf_scale=nerf_scale)
 
@@ -128,7 +131,7 @@ class FieldBase(torch.nn.Module):
                     else:
                         raise ValueError(f"Invalid out_channels={out_channels}, expected 4 or 3 or 1 or >4")
                     output = torch.nn.functional.interpolate(output, size=(512, 512), mode='nearest') # TODO: properly interpolate here for x8 vae for viewing
-                    
+
                 if not (torch.all(output >= 0.0) and torch.all(output <= 1.0)):
                     warnings.warn(f"output.min()={output.min()}, output.max()={output.max()}, output.shape={output.shape}")
                     output = output.clamp(0.0, 1.0)

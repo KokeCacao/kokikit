@@ -99,13 +99,6 @@ class NeRFDataset(Dataset):
             device=device,
         ) # [B, 3], [B, 3], [B, 3]
 
-        # sanity check
-        # _thetas = torch.acos(-forward_vector[:, 1])
-        # _phis = torch.atan2(-forward_vector[:, 0], -forward_vector[:, 2])
-        # _phis[_phis < 0] += 2 * np.pi
-        # assert torch.allclose(thetas, _thetas)
-        # assert torch.allclose(phis, _phis)
-
         c2w = self._get_c2w(
             batch_size=batch_size,
             up_vector=up_vector,
@@ -164,7 +157,7 @@ class NeRFDataset(Dataset):
 
         return ray_bundle
 
-    def get_eval_ray_bundle(self, h_latent: int, w_latent: int, c2w: Tensor, fov_y: float, near: float, far: float) -> RayBundle:
+    def get_eval_ray_bundle(self, h_latent: int, w_latent: int, c2w: Tensor, fov_y: float) -> RayBundle:
         near_plane = self.near_plane
         far_plane = self.far_plane
         device = self.device
@@ -362,7 +355,23 @@ class NeRFDataset(Dataset):
         #  [r_z, u_z, -f_z, o_z]
         #  [  0,   0,    0,   1]]
         # we negate front vector because camera looks at -z
+        
+        # sanity check
+        # _thetas = torch.acos(-forward_vector[:, 1])
+        # _phis = torch.atan2(-forward_vector[:, 0], -forward_vector[:, 2])
+        # _phis[_phis < 0] += 2 * np.pi
+        # assert torch.allclose(thetas, _thetas)
+        # assert torch.allclose(phis, _phis)
         return c2w # [B, 4, 4]
+    
+    @staticmethod
+    def _get_thetas_phis_r(c2w: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        forward_vector = c2w[:, :3, 2]
+        thetas = torch.acos(-forward_vector[:, 1])
+        phis = torch.atan2(-forward_vector[:, 0], -forward_vector[:, 2])
+        phis[phis < 0] += 2 * np.pi
+        r = torch.norm(c2w[:, :3, 3], dim=-1)
+        return thetas, phis, r
 
     @staticmethod
     def _get_rays_o(
