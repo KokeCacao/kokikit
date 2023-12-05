@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING, Callable, Any, Union, Tuple
 import warnings
 if TYPE_CHECKING:
     from torch import Tensor
-    from .nerf_fields import FARTNeRFContraction
     from .ray_samplers import RaySamples
 
 import numpy as np
@@ -14,6 +13,7 @@ except EnvironmentError as e:
     warnings.warn(f"WARNING: {e}\nThis error is fine for CPU-only mode.", ImportWarning)
 
 from .nerf_fields import NeRFField
+from .nerf_fields import FARTNeRFContraction
 
 
 class HashMLPDensityField(NeRFField):
@@ -23,6 +23,7 @@ class HashMLPDensityField(NeRFField):
         num_layers: int,
         hidden_dim: int,
         contraction: FARTNeRFContraction,
+        aabb_scale: float,
         density_activation: Union[torch.nn.Module, Callable[..., Any]],
         use_linear: bool,
         num_levels: int,
@@ -37,6 +38,8 @@ class HashMLPDensityField(NeRFField):
         super().__init__()
         self.use_linear = use_linear
         self.density_activation = density_activation
+        self.contraction = contraction
+        self.aabb_scale = aabb_scale
 
         config = {
             "encoding": {
@@ -88,14 +91,38 @@ class HashMLPDensityField(NeRFField):
 
         self.background = self.background.to(device)
 
-    def get_density(self, positions: Tensor):
-        original_positions = positions
+    def contract(self, positions: Tensor) -> Tuple[Tensor, Tensor]:
+        # Assuming center of the scene is at the origin, and the scene is scaled to [-1, 1]^3
+        # Note that the function should only be applied at the end of sampling pipeline
+        # It only transform point positions, not a Frustum
+        positions = positions / self.aabb_scale
 
+        if self.contraction == FARTNeRFContraction.NO_CONTRACTION:
+            return positions, torch.zeros(*(positions.shape[:-1]), dtype=torch.bool)  # [N, 3], [N]
+        elif self.contraction == FARTNeRFContraction.L2_CONTRACTION:
+            mag_raw: Tensor = torch.linalg.norm(positions, ord=2, dim=-1)
+            mag = mag_raw[..., None]
+
+            positions = torch.where(mag > 1.0, (2 - (1 / mag)) * (positions / mag), positions)
+            contracted_mask = torch.where(mag_raw > 1.0, True, False)
+            return positions, contracted_mask
+        elif self.contraction == FARTNeRFContraction.LINF_CONTRACTION:
+            mag_raw: Tensor = torch.linalg.norm(positions, ord=float("inf"), dim=-1)
+            mag = mag_raw[..., None]
+
+            positions = torch.where(mag > 1.0, (2 - (1 / mag)) * (positions / mag), positions)
+            positions = positions / 2.0  # normalization for grid_sample
+            contracted_mask = torch.where(mag_raw > 1.0, True, False)
+            return positions, contracted_mask
+        else:
+            raise NotImplementedError
+
+    def get_density(self, positions: Tensor):
         n_ray: int = positions.shape[-3]
         n_sample: int = positions.shape[-2]
         assert positions.shape[-1] == 3
         positions = positions.reshape(-1, 3) # [N_ray * N_sample, 3]
-        # TODO: contraction
+        positions, contracted_mask = self.contract(positions) # [N_ray * N_sample, 3], [N_ray * N_sample]
 
         background_positions_selector = torch.linalg.norm(positions, ord=float("inf"), dim=-1) > 1.0
         foreground_positions = positions[~background_positions_selector] # [N_ray * N_sample, 3]
@@ -108,7 +135,7 @@ class HashMLPDensityField(NeRFField):
             assert torch.all(torch.logical_and(
                 foreground_positions >= 0.0,
                 foreground_positions <= 1.0,
-            ))
+            )), f"Observed invalid positions: min={torch.min(foreground_positions)}, max={torch.max(foreground_positions)}"
 
             if self.use_linear:
                 features_densities_foreground = self.linear(self.encoding(foreground_positions)).view(-1, 1)

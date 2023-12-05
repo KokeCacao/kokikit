@@ -234,6 +234,7 @@ class FARTNeRFField(NeRFField):
         self.density_init: DensityInit = density_init
         self.density_activation = density_activation
         self.color_activation = color_activation
+        self.contraction = contraction
 
         self.grid_output_dim = color_degree * ((max_sh_order + 1)**2) + 1
 
@@ -275,19 +276,31 @@ class FARTNeRFField(NeRFField):
     def parameters(self, recurse: bool = True) -> Iterator[torch.nn.Parameter]:
         return super().parameters(recurse)
 
-    # def contract(self, positions: Tensor) -> Tuple[Tensor, Tensor]:
-    #     # Assuming center of the scene is at the origin, and the scene is scaled to [-1, 1]^3
-    #     # Note that the function should only be applied at the end of sampling pipeline
-    #     # It only transform point positions, not a Frustum
-    #     mag_raw: Tensor = torch.linalg.norm(positions, ord=float("inf"), dim=-1)
-    #     mag = mag_raw[..., None]
+    def contract(self, positions: Tensor) -> Tuple[Tensor, Tensor]:
+        # Assuming center of the scene is at the origin, and the scene is scaled to [-1, 1]^3
+        # Note that the function should only be applied at the end of sampling pipeline
+        # It only transform point positions, not a Frustum
+        positions = positions / self.aabb_scale
 
-    #     positions = torch.where(mag > 1.0, (2 - (1 / mag)) * (positions / mag), positions)
-    #     # At this line, uncontracted positions are in [-1, 1]^3, contracted positions are in [-2, 2]^3
-    #     positions = positions / 2.0
-    #     # At this line, uncontracted positions are in [-0.5, 0.5]^3, contracted positions are in [-1, 1]^3
-    #     contracted_mask = torch.where(mag_raw > 1.0, True, False)
-    #     return positions, contracted_mask
+        if self.contraction == FARTNeRFContraction.NO_CONTRACTION:
+            return positions, torch.zeros(*(positions.shape[:-1]), dtype=torch.bool)  # [N, 3], [N]
+        elif self.contraction == FARTNeRFContraction.L2_CONTRACTION:
+            mag_raw: Tensor = torch.linalg.norm(positions, ord=2, dim=-1)
+            mag = mag_raw[..., None]
+
+            positions = torch.where(mag > 1.0, (2 - (1 / mag)) * (positions / mag), positions)
+            contracted_mask = torch.where(mag_raw > 1.0, True, False)
+            return positions, contracted_mask
+        elif self.contraction == FARTNeRFContraction.LINF_CONTRACTION:
+            mag_raw: Tensor = torch.linalg.norm(positions, ord=float("inf"), dim=-1)
+            mag = mag_raw[..., None]
+
+            positions = torch.where(mag > 1.0, (2 - (1 / mag)) * (positions / mag), positions)
+            positions = positions / 2.0  # normalization for grid_sample
+            contracted_mask = torch.where(mag_raw > 1.0, True, False)
+            return positions, contracted_mask
+        else:
+            raise NotImplementedError
 
     def get_density(self, positions: Tensor) -> Tuple[Tensor, Tensor]:
         original_positions = (
@@ -304,7 +317,7 @@ class FARTNeRFField(NeRFField):
 
         # CONTRACTION and GRID INTERPOLATION
         positions = positions.reshape(-1, 3) # [N_ray * N_sample, 3]
-        # positions, contracted_mask = self.contract(positions) # [N_ray * N_sample, 3], [N_ray * N_sample]
+        positions, contracted_mask = self.contract(positions) # [N_ray * N_sample, 3], [N_ray * N_sample]
 
         # background: everything outside of [-1, 1]^3
         background_positions_selector = torch.linalg.norm(positions, ord=float("inf"), dim=-1) > 1.0

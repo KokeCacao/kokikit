@@ -456,16 +456,16 @@ class SpacedSampler(Sampler):
         num_samples: Number of samples per ray
         spacing_fn: Function that dictates sample spacing (ie `lambda x : x` is uniform).
         spacing_fn_inv: The inverse of spacing_fn.
-        stratified: Use stratified sampling during training. Defaults to True
-        single_jitter: Use a same random jitter for all samples along a ray. Defaults to False
+        stratified: Use stratified sampling during training.
+        single_jitter: Use a same random jitter for all samples along a ray.
     """
 
     def __init__(
         self,
         spacing_fn: Callable,
         spacing_fn_inv: Callable,
-        stratified=True,
-        single_jitter=False,
+        stratified: bool,
+        single_jitter: bool,
     ) -> None:
         super().__init__()
         self.stratified = stratified
