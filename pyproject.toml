@@ -12,6 +12,7 @@ dependencies = [
   "numpy",
   "diffusers",
   "nerfacc",
+  "pycolmap",
   "tinycudann @ git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch",
   "diff_gaussian_rasterization @ git+https://github.com/ashawkey/diff-gaussian-rasterization",
   "simple_knn @ git+https://gitlab.inria.fr/bkerbl/simple-knn",
@@ -31,7 +32,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-full = ["xformers", "tqdm", "rich"]
+full = ["xformers", "tqdm", "rich", "pycolmap"]
 reconstruction = ["pycolmap"]
 
 [project.urls]
