@@ -368,23 +368,9 @@ class ColmapDataset(Dataset):
 
         if self.image_dir is not None:
             self.json = self.preprocess(cleanup=cleanup)
-            print(f"w: {self.json['w']}, h: {self.json['h']}")
-            print(f"fl_x: {self.json['fl_x']}, fl_y: {self.json['fl_y']}")
-            fov_x: float = 2 * np.arctan(self.json["w"] / (2 * self.json["fl_x"]))
-            fov_y: float = 2 * np.arctan(self.json["h"] / (2 * self.json["fl_y"]))
-            print(f"FOV local: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
             self.json = self.to_our_convention(self.json)
-            fov_x: float = 2 * np.arctan(self.json["w"] / (2 * self.json["fl_x"]))
-            fov_y: float = 2 * np.arctan(self.json["h"] / (2 * self.json["fl_y"]))
-            print(f"FOV local: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
             self.json = self.to_center_of_mass(self.json)
-            fov_x: float = 2 * np.arctan(self.json["w"] / (2 * self.json["fl_x"]))
-            fov_y: float = 2 * np.arctan(self.json["h"] / (2 * self.json["fl_y"]))
-            print(f"FOV local: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
             self.json = self.to_unit_cube(self.json)
-            fov_x: float = 2 * np.arctan(self.json["w"] / (2 * self.json["fl_x"]))
-            fov_y: float = 2 * np.arctan(self.json["h"] / (2 * self.json["fl_y"]))
-            print(f"FOV local: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
 
         self.frames = None # [B, 3, H, W]
         # {
@@ -514,9 +500,9 @@ class ColmapDataset(Dataset):
         h = int(self.json["h"] * scale_factor)
         focal = focal * scale_factor
 
-        fov_x = 2 * np.arctan(self.json["w"] * scale_factor / (2 * focal))
-        fov_y = 2 * np.arctan(self.json["h"] * scale_factor / (2 * focal))
-        print(f"FOV remote: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
+        # fov_x = 2 * np.arctan(self.json["w"] * scale_factor / (2 * focal))
+        # fov_y = 2 * np.arctan(self.json["h"] * scale_factor / (2 * focal))
+        # print(f"FOV remote: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
 
         dataset: List[Dict[str, Any]] = []
         for frame in self.json["frames"]:

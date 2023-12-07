@@ -501,6 +501,8 @@ class SpacedSampler(Sampler):
             bin_upper = torch.cat([bin_centers, bins[..., -1:]], -1)
             bin_lower = torch.cat([bins[..., :1], bin_centers], -1)
             bins = bin_lower + (bin_upper - bin_lower) * t_rand # [B, H, W, num_samples+1]
+        else:
+            bins = bins.expand(size=(B, H, W, num_samples + 1))
 
         s_near, s_far = (self.spacing_fn(x) for x in (ray_bundle.nears, ray_bundle.fars))
         spacing_to_euclidean_fn: Callable[..., Tensor] = lambda x: self.spacing_fn_inv(torch.lerp(s_near, end=s_far, weight=x)) # don't use bins * s_far + (1 - bins) * s_near due to floating point error
