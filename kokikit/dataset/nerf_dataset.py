@@ -1,9 +1,12 @@
 import random
 import torch
+import io
+import base64
 import numpy as np
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any
 from torch import Tensor
+from PIL import Image
 
 from ..utils.utils import safe_normalize
 from ..nerf.rays import RayBundle
@@ -23,7 +26,6 @@ class NeRFDataset(Dataset):
         phi_min: float,
         phi_max: float,
         uniform_sphere_rate: float,
-        theta_overhead: float,
         fov_y_min: float,
         fov_y_max: float,
         device: torch.device,
@@ -36,7 +38,6 @@ class NeRFDataset(Dataset):
         self.phi_min: float = phi_min
         self.phi_max: float = phi_max
         self.uniform_sphere_rate: float = uniform_sphere_rate
-        self.theta_overhead: float = theta_overhead
         self.fov_y_min: float = fov_y_min
         self.fov_y_max: float = fov_y_max
         self.near_plane: float = collider.near_plane
@@ -45,8 +46,8 @@ class NeRFDataset(Dataset):
 
     def get_train_ray_bundle(
         self,
-        cx_latent_dataset: int,
-        cy_latent_dataset: int,
+        cx_latent_dataset: float,
+        cy_latent_dataset: float,
         h_latent_dataset: int,
         w_latent_dataset: int,
         batch_size: int,
@@ -60,7 +61,6 @@ class NeRFDataset(Dataset):
         phi_max = self.phi_max
         uniform_sphere_rate = self.uniform_sphere_rate
 
-        theta_overhead = self.theta_overhead
         fov_y_min = self.fov_y_min
         fov_y_max = self.fov_y_max
         cx_latent = cx_latent_dataset
@@ -214,11 +214,10 @@ class NeRFDataset(Dataset):
             c2w=c2w,
         ) # [1, H, W, 3], [1, H, W, 3], [1,]
 
-    def get_test_ray_bundle(self, cx_latent_dataset: int, cy_latent_dataset: int, h_latent_dataset: int, w_latent_dataset: int, batch_size: int, idx: Optional[Tensor], super_resolution: int = 1) -> RayBundle:
+    def get_test_ray_bundle(self, cx_latent_dataset: float, cy_latent_dataset: float, h_latent_dataset: int, w_latent_dataset: int, batch_size: int, idx: Optional[Tensor], super_resolution: int = 1) -> RayBundle:
         radius = (self.radius_min + self.radius_max) / 2
         fov_y = (self.fov_y_min + self.fov_y_max) / 2
 
-        theta_overhead = self.theta_overhead
         cx_latent = cx_latent_dataset * super_resolution
         cy_latent = cy_latent_dataset * super_resolution
         h_latent = h_latent_dataset * super_resolution
@@ -444,3 +443,95 @@ class NeRFDataset(Dataset):
             torch.sin(thetas) * torch.cos(phis),
         ], dim=-1) # [B, 3]
         return thetas, phis, ray_o # [B,], [B,], [B, 3]
+
+class NeRFSingleImageDataset(NeRFDataset):
+    def __init__(
+        self,
+        image: Tensor,
+        collider: Collider,
+        radius: float,
+        theta: float,
+        phi: float,
+        fov_y: float,
+        device: torch.device,
+    ) -> None:
+        super().__init__(
+            collider=collider,
+            radius_min=radius,
+            radius_max=radius,
+            theta_min=theta,
+            theta_max=theta,
+            phi_min=phi,
+            phi_max=phi,
+            uniform_sphere_rate=0.0,
+            fov_y_min=fov_y,
+            fov_y_max=fov_y,
+            device=device,
+        )
+        self.fov_y = fov_y
+        
+        if len(image.shape) == 3:
+            image = image.unsqueeze(0)
+        
+        self.frames = image.to(device=device) # [1, 3, H, W]
+        self.H = image.shape[-2]
+        self.W = image.shape[-1]
+        self.ray_bundle = super().get_train_ray_bundle(
+            cx_latent_dataset=self.W / 2,
+            cy_latent_dataset=self.H / 2,
+            h_latent_dataset=self.H,
+            w_latent_dataset=self.W,
+            batch_size=1,
+            mv_dream_views=None,
+        )
+
+    def get_train_images_and_ray(self, batch_size: int) -> Tuple[Tensor, RayBundle]:
+        assert batch_size == 1, f"batch_size must be 1 for NeRFSingleImageDataset, but got {batch_size}"
+        images = self.get_train_images() # [1, 3, H, W]
+        ray_bundle = self.get_train_ray_bundle()
+        return images, ray_bundle
+    
+    def get_train_images(self) -> Tensor:
+        return self.frames # [1, 3, H, W]
+        
+    def get_train_ray_bundle(
+        self
+    ) -> RayBundle:
+        return self.ray_bundle
+        
+    def get_nerf_panel_info(self, scale_factor=0.01) -> List[Dict[str, Any]]:
+        # Used for:
+        # self.set_output("render", {
+        #     "dataset": [
+        #         {
+        #             "c2w": nerf_dataset.c2w,
+        #             "image": nerf_dataset.image,
+        #             "focal": nerf_dataset.focal,
+        #         },
+        #        ...
+        #     ]
+        # })
+        focal = self.H / (2 * np.tan(self.fov_y / 2)) * scale_factor
+        w = int(self.W * scale_factor)
+        h = int(self.H * scale_factor)
+
+        # fov_x = 2 * np.arctan(self.json["w"] * scale_factor / (2 * focal))
+        # fov_y = 2 * np.arctan(self.json["h"] * scale_factor / (2 * focal))
+        # print(f"FOV remote: {math.degrees(fov_x)}, {math.degrees(fov_y)}")
+
+        # convert self.frames[0] to PIL from gpu tensor in range [-1, 1]
+        image = ((self.frames[0].cpu().detach().numpy() + 1) / 2 * 255).astype(np.uint8)
+        image = Image.fromarray(image.transpose(1, 2, 0)).resize((w, h)) # rescale
+
+        # Convert to base64
+        byte = io.BytesIO()
+        image.save(byte, format="PNG")
+        image = "data:image/png;base64," + base64.b64encode(byte.getvalue()).decode("utf-8")
+
+        assert self.ray_bundle.c2w is not None
+        c2w = self.ray_bundle.c2w[0].cpu().detach().numpy().tolist()
+        return [{
+                "c2w": c2w,
+                "image": image,
+                "focal": focal,
+            }]

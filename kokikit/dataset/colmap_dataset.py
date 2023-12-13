@@ -445,8 +445,8 @@ class ColmapDataset(Dataset):
         total_frames = len(self.json["frames"])
         frame_indices = np.random.randint(0, total_frames, size=batch_size)
 
-        images = self.get_train_images(frame_indices)
-        ray_bundle = self.get_train_ray_bundle(frame_indices)
+        images = self.get_train_images(frame_indices=frame_indices)
+        ray_bundle = self.get_train_ray_bundle(frame_indices=frame_indices)
         return images, ray_bundle
 
     def get_train_images(self, frame_indices: np.ndarray, transform: Callable = torchvision.transforms.ToTensor()) -> Tensor:
