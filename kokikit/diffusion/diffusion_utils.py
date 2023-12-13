@@ -170,9 +170,9 @@ def predict_noise_sd( # for any stable-diffusion-based models
 def predict_noise_sdxl_turbo(
     unet_sdxl: UNet2DConditionModel,
     latents_noised: Tensor,
-    text_embeddings_conditional: Tensor,
-    text_embeddings_conditional_pooled: Tensor,
-    text_embeddings_conditional_micro: Tensor,
+    text_embeddings_unconditional: Tensor,
+    text_embeddings_unconditional_pooled: Tensor,
+    text_embeddings_unconditional_micro: Tensor,
     lora_scale: float, # > 0 to enable lora
     t: Tensor,
     scheduler: DDIMScheduler,
@@ -183,14 +183,14 @@ def predict_noise_sdxl_turbo(
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
 
     added_cond_kwargs = {
-        "text_embeds": text_embeddings_conditional_pooled,
-        "time_ids": text_embeddings_conditional_micro,
+        "text_embeds": text_embeddings_unconditional_pooled,
+        "time_ids": text_embeddings_unconditional_micro,
     }
 
     pred = unet_sdxl(
         latents_noised,
         t,
-        encoder_hidden_states=text_embeddings_conditional,
+        encoder_hidden_states=text_embeddings_unconditional,
         cross_attention_kwargs={
             'scale': lora_scale
         } if lora_scale > 0 else {},
