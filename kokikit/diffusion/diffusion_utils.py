@@ -1,7 +1,8 @@
 import torch
 
 from torch import Tensor
-from diffusers import UNet2DConditionModel
+from diffusers.models.unet_2d_condition import UNet2DConditionModel
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
     AttnAddedKVProcessor2_0,
@@ -9,7 +10,6 @@ from diffusers.models.attention_processor import (
     LoRAAttnProcessor,
     SlicedAttnAddedKVProcessor,
 )
-from diffusers import DDIMScheduler
 from typing import Dict, Union, List, Optional, Tuple, Callable
 
 
@@ -144,6 +144,107 @@ def predict_noise_sd( # for any stable-diffusion-based models
         cross_attention_kwargs={
             'scale': lora_scale
         } if lora_scale > 0 else {},
+    ).sample
+    noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
+
+    # cfg
+    noise_pred_conditional, noise_pred_unconditional = noise_pred.chunk(2)
+    noise_pred = guidance(unconditional=noise_pred_unconditional, conditional=noise_pred_conditional, cfg=cfg)
+
+    # reconstruction loss
+    if not reconstruction_loss:
+        return noise_pred, None
+
+    noise_pred_x0: Tensor = scheduler.step(noise_pred, t, latents_noised).pred_original_sample # [B*n_view, C, H, W] # type: ignore
+    noise_pred_x0 = cfg_rescale_x0(
+        cfg_rescale=cfg_rescale,
+        noise_pred_x0=noise_pred_x0,
+        noise_pred_conditional=noise_pred_conditional,
+        latents_noised=latents_noised,
+        scheduler=scheduler,
+        t=t,
+    ) # cfg rescale
+
+    return noise_pred, noise_pred_x0
+
+def predict_noise_sdxl_turbo(
+    unet_sdxl: UNet2DConditionModel,
+    latents_noised: Tensor,
+    text_embeddings_conditional: Tensor,
+    text_embeddings_conditional_pooled: Tensor,
+    text_embeddings_conditional_micro: Tensor,
+    lora_scale: float, # > 0 to enable lora
+    t: Tensor,
+    scheduler: DDIMScheduler,
+    reconstruction_loss: bool,
+) -> Tuple[Tensor, Optional[Tensor]]:
+    if torch.backends.cudnn.version() >= 7603: # type: ignore
+        # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
+        latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+
+    added_cond_kwargs = {
+        "text_embeds": text_embeddings_conditional_pooled,
+        "time_ids": text_embeddings_conditional_micro,
+    }
+
+    pred = unet_sdxl(
+        latents_noised,
+        t,
+        encoder_hidden_states=text_embeddings_conditional,
+        cross_attention_kwargs={
+            'scale': lora_scale
+        } if lora_scale > 0 else {},
+        added_cond_kwargs=added_cond_kwargs,
+    ).sample
+    noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
+
+    # reconstruction loss
+    if not reconstruction_loss:
+        return noise_pred, None
+
+    noise_pred_x0: Tensor = scheduler.step(noise_pred, t, latents_noised).pred_original_sample # [B*n_view, C, H, W] # type: ignore
+
+    return noise_pred, noise_pred_x0
+
+def predict_noise_sdxl(
+    unet_sdxl: UNet2DConditionModel,
+    latents_noised: Tensor,
+    text_embeddings_conditional: Tensor,
+    text_embeddings_unconditional: Tensor,
+    text_embeddings_conditional_pooled: Tensor,
+    text_embeddings_unconditional_pooled: Tensor,
+    text_embeddings_conditional_micro: Tensor,
+    text_embeddings_unconditional_micro: Tensor,
+    cfg: float,
+    lora_scale: float, # > 0 to enable lora
+    t: Tensor,
+    scheduler: DDIMScheduler,
+    reconstruction_loss: bool,
+    cfg_rescale: float,
+) -> Tuple[Tensor, Optional[Tensor]]:
+    if torch.backends.cudnn.version() >= 7603: # type: ignore
+        # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
+        latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+
+    added_cond_kwargs = {
+        "text_embeds": torch.cat([
+            text_embeddings_conditional_pooled,
+            text_embeddings_unconditional_pooled,
+        ], dim=0),
+        "time_ids": torch.cat([
+            text_embeddings_conditional_micro,
+            text_embeddings_unconditional_micro,
+        ], dim=0),
+    }
+
+    pred = unet_sdxl(
+        torch.cat([latents_noised] * 2, dim=0),
+        t,
+        encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
+        cross_attention_kwargs={
+            'scale': lora_scale
+        } if lora_scale > 0 else {},
+        added_cond_kwargs=added_cond_kwargs,
     ).sample
     noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
 
