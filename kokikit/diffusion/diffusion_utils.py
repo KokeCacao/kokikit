@@ -1,6 +1,7 @@
 import torch
 
 from torch import Tensor
+from diffusers.models.controlnet import ControlNetModel
 from diffusers.models.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.models.attention_processor import (
@@ -12,6 +13,58 @@ from diffusers.models.attention_processor import (
 )
 from typing import Dict, Union, List, Optional, Tuple, Callable
 
+def get_controlnet_embedding(
+    time: Tensor,
+    latents_noised: Tensor,
+    encoder_hidden_states: Tensor,
+    added_cond_kwargs: Dict[str, Tensor],
+    controlnet: Union[ControlNetModel, List[ControlNetModel]],
+    image: Union[Tensor, List[Tensor]],
+    conditioning_scale: Union[float, List[float]] = 1.0,
+    guess_mode: Union[bool, List[bool]] = False, # scales *= torch.logspace(-1, 0, len(down_block_res_samples) + 1)  # 0.1 to 1.0
+) -> Tuple[List[Tensor], Tensor]:
+    if isinstance(controlnet, (list, tuple)):
+        multi_controlnet = torch.nn.ModuleList(controlnet)
+    else:
+        multi_controlnet = torch.nn.ModuleList([controlnet])
+    n_control = len(multi_controlnet)
+    assert n_control != 0
+    
+    if not isinstance(image, (list, tuple)):
+        image = [image] * n_control
+    if not isinstance(conditioning_scale, (list, tuple)):
+        conditioning_scale = [float(conditioning_scale)] * n_control
+    if not isinstance(guess_mode, (list, tuple)):
+        guess_mode = [guess_mode] * n_control
+
+    down_block_res_samples = None
+    mid_block_res_sample = None
+    for i, (_multi_controlnet, _image, _conditioning_scale, _guess_mode) in enumerate(zip(multi_controlnet, image, conditioning_scale, guess_mode)):
+        down_samples, mid_sample = _multi_controlnet(
+            sample=latents_noised,
+            timestep=time,
+            encoder_hidden_states=encoder_hidden_states,
+            controlnet_cond=_image,
+            conditioning_scale=_conditioning_scale,
+            class_labels=None, # TODO: not sure what it does
+            timestep_cond=None, # TODO: not sure what it does
+            attention_mask=None, # TODO: not sure what it does
+            added_cond_kwargs=added_cond_kwargs,
+            cross_attention_kwargs=None, # TODO: maybe allow it?
+            guess_mode=_guess_mode,
+            return_dict=False,
+        )
+
+        # merge samples
+        if i == 0:
+            down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
+        else:
+            assert down_block_res_samples is not None and mid_block_res_sample is not None
+            down_block_res_samples = [samples_prev + samples_curr for samples_prev, samples_curr in zip(down_block_res_samples, down_samples)]
+            mid_block_res_sample += mid_sample
+
+    assert down_block_res_samples is not None and mid_block_res_sample is not None
+    return down_block_res_samples, mid_block_res_sample
 
 def extract_lora_diffusers(unet: UNet2DConditionModel) -> Dict[str, Union[LoRAAttnAddedKVProcessor, LoRAAttnProcessor]]:
     # https://github.com/huggingface/diffusers/blob/4f14b363297cf8deac3e88a3bf31f59880ac8a96/examples/dreambooth/train_dreambooth_lora.py#L833
@@ -177,6 +230,11 @@ def predict_noise_sdxl_turbo(
     t: Tensor,
     scheduler: DDIMScheduler,
     reconstruction_loss: bool,
+    # controlnet
+    controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
+    image: Optional[Union[Tensor, List[Tensor]]] = None,
+    conditioning_scale: Optional[Union[float, List[float]]] = None,
+    guess_mode: Optional[Union[bool, List[bool]]] = None,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
@@ -186,6 +244,20 @@ def predict_noise_sdxl_turbo(
         "text_embeds": text_embeddings_unconditional_pooled,
         "time_ids": text_embeddings_unconditional_micro,
     }
+    
+    down_block_res_samples, mid_block_res_sample = None, None
+    if controlnet is not None:
+        assert image is not None and conditioning_scale is not None and guess_mode is not None
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embedding(
+            time=t,
+            latents_noised=latents_noised,
+            encoder_hidden_states=text_embeddings_unconditional,
+            added_cond_kwargs=added_cond_kwargs,
+            controlnet=controlnet,
+            image=image,
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
 
     pred = unet_sdxl(
         latents_noised,
@@ -195,6 +267,8 @@ def predict_noise_sdxl_turbo(
             'scale': lora_scale
         } if lora_scale > 0 else {},
         added_cond_kwargs=added_cond_kwargs,
+        down_block_additional_residuals=down_block_res_samples,
+        mid_block_additional_residual=mid_block_res_sample,
     ).sample
     noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
 
