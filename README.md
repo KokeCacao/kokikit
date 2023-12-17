@@ -6,9 +6,13 @@ A General NeRF and Diffusion Toolkit for [KatUI](https://github.com/KokeCacao/Ka
 # for production
 pip install "git+https://github.com/KokeCacao/kokikit.git"
 
-# for developers
+# for developers who intend to edit the module (but pylance will lint incorrectly)
 git clone https://github.com/KokeCacao/kokikit.git
 pip install -e .
+
+# for developers who want local install (but changes won't automatically reflected)
+git clone https://github.com/KokeCacao/kokikit.git
+pip install .
 ```
 
 ## Citation
