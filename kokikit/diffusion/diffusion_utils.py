@@ -17,7 +17,7 @@ def get_controlnet_embedding(
     time: Tensor,
     latents_noised: Tensor,
     encoder_hidden_states: Tensor,
-    added_cond_kwargs: Dict[str, Tensor],
+    added_cond_kwargs: Optional[Dict[str, Tensor]],
     controlnet: Union[ControlNetModel, List[ControlNetModel]],
     image: Union[Tensor, List[Tensor]],
     conditioning_scale: Union[float, List[float]] = 1.0,
@@ -64,6 +64,70 @@ def get_controlnet_embedding(
             mid_block_res_sample += mid_sample
 
     assert down_block_res_samples is not None and mid_block_res_sample is not None
+    return down_block_res_samples, mid_block_res_sample
+
+def get_controlnet_embeddings(
+    condition_side_control: bool,
+    uncondition_side_control: bool,
+    time: Tensor,
+    latents_noised: Tensor,
+    text_embeddings_conditional: Tensor,
+    text_embeddings_unconditional: Tensor,
+    added_cond_kwargs_conditional: Optional[Dict[str, Tensor]],
+    added_cond_kwargs_unconditional: Optional[Dict[str, Tensor]],
+    controlnet: Union[ControlNetModel, List[ControlNetModel]],
+    image: Union[Tensor, List[Tensor]],
+    conditioning_scale: Union[float, List[float]] = 1.0,
+    guess_mode: Union[bool, List[bool]] = False,
+) -> Tuple[Optional[List[Tensor]], Optional[Tensor]]:
+    if condition_side_control and not uncondition_side_control:
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embedding(
+            time=time,
+            latents_noised=latents_noised,
+            encoder_hidden_states=text_embeddings_conditional,
+            added_cond_kwargs=added_cond_kwargs_conditional,
+            controlnet=controlnet,
+            image=image,
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
+        down_block_res_samples = [torch.cat([d, torch.zeros_like(d)]) for d in down_block_res_samples]
+        mid_block_res_sample = torch.cat([mid_block_res_sample, torch.zeros_like(mid_block_res_sample)])
+    elif not condition_side_control and uncondition_side_control:
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embedding(
+            time=time,
+            latents_noised=latents_noised,
+            encoder_hidden_states=text_embeddings_unconditional,
+            added_cond_kwargs=added_cond_kwargs_unconditional,
+            controlnet=controlnet,
+            image=image,
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
+        down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+        mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
+    elif condition_side_control and uncondition_side_control:
+        added_cond_kwargs = None
+        if added_cond_kwargs_conditional is not None and added_cond_kwargs_unconditional is not None:
+            added_cond_kwargs = {
+                k: torch.cat([v_cond, v_uncond], dim=0) for k, v_cond, v_uncond in zip(
+                    added_cond_kwargs_conditional.keys(),
+                    added_cond_kwargs_conditional.values(),
+                    added_cond_kwargs_unconditional.values(),
+                )
+            }
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embedding(
+            time=time,
+            latents_noised=torch.cat([latents_noised, latents_noised], dim=0),
+            encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
+            added_cond_kwargs=added_cond_kwargs,
+            controlnet=controlnet,
+            image=torch.cat([image, image], dim=0) if isinstance(image, Tensor) else [torch.cat([i, i], dim=0) for i in image],
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
+    else:
+        down_block_res_samples, mid_block_res_sample = None, None
     return down_block_res_samples, mid_block_res_sample
 
 def extract_lora_diffusers(unet: UNet2DConditionModel) -> Dict[str, Union[LoRAAttnAddedKVProcessor, LoRAAttnProcessor]]:
@@ -185,18 +249,46 @@ def predict_noise_sd( # for any stable-diffusion-based models
         scheduler: DDIMScheduler,
         reconstruction_loss: bool,
         cfg_rescale: float,
+        # controlnet
+        controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
+        image: Optional[Union[Tensor, List[Tensor]]] = None,
+        conditioning_scale: Optional[Union[float, List[float]]] = None,
+        guess_mode: Optional[Union[bool, List[bool]]] = None,
+        condition_side_control: bool = True,
+        uncondition_side_control: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
+
+    down_block_res_samples, mid_block_res_sample = None, None
+    if controlnet is not None:
+        assert image is not None and conditioning_scale is not None and guess_mode is not None
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embeddings(
+            condition_side_control=condition_side_control,
+            uncondition_side_control=uncondition_side_control,
+            time=t,
+            latents_noised=latents_noised,
+            text_embeddings_conditional=text_embeddings_conditional,
+            text_embeddings_unconditional=text_embeddings_unconditional,
+            added_cond_kwargs_conditional=None,
+            added_cond_kwargs_unconditional=None,
+            controlnet=controlnet,
+            image=image,
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
 
     pred = unet_sd(
-        torch.cat([latents_noised] * 2, dim=0),
+        torch.cat([latents_noised] * 2, dim=0), # type: ignore
         t,
         encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
             'scale': lora_scale
         } if lora_scale > 0 else {},
+        down_block_additional_residuals=down_block_res_samples,
+        mid_block_additional_residual=mid_block_res_sample,
     ).sample
     noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
 
@@ -235,10 +327,14 @@ def predict_noise_sdxl_turbo(
     image: Optional[Union[Tensor, List[Tensor]]] = None,
     conditioning_scale: Optional[Union[float, List[float]]] = None,
     guess_mode: Optional[Union[bool, List[bool]]] = None,
+    # we don't care about the following arguments
+    condition_side_control: bool = True,
+    uncondition_side_control: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     added_cond_kwargs = {
         "text_embeds": text_embeddings_unconditional_pooled,
@@ -295,10 +391,18 @@ def predict_noise_sdxl(
     scheduler: DDIMScheduler,
     reconstruction_loss: bool,
     cfg_rescale: float,
+    # controlnet
+    controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
+    image: Optional[Union[Tensor, List[Tensor]]] = None,
+    conditioning_scale: Optional[Union[float, List[float]]] = None,
+    guess_mode: Optional[Union[bool, List[bool]]] = None,
+    condition_side_control: bool = True,
+    uncondition_side_control: bool = False,
 ) -> Tuple[Tensor, Optional[Tensor]]:
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     added_cond_kwargs = {
         "text_embeds": torch.cat([
@@ -310,15 +414,33 @@ def predict_noise_sdxl(
             text_embeddings_unconditional_micro,
         ], dim=0),
     }
+    
+    down_block_res_samples, mid_block_res_sample = None, None
+    if controlnet is not None:
+        assert image is not None and conditioning_scale is not None and guess_mode is not None
+        down_block_res_samples, mid_block_res_sample = get_controlnet_embedding(
+            time=t,
+            latents_noised=latents_noised,
+            encoder_hidden_states=text_embeddings_conditional,
+            added_cond_kwargs=added_cond_kwargs,
+            controlnet=controlnet,
+            image=image,
+            conditioning_scale=conditioning_scale,
+            guess_mode=guess_mode,
+        )
+        down_block_res_samples = [torch.cat([d if condition_side_control else torch.zeros_like(d), d if uncondition_side_control else torch.zeros_like(d)]) for d in down_block_res_samples]
+        mid_block_res_sample = torch.cat([mid_block_res_sample if condition_side_control else torch.zeros_like(mid_block_res_sample), mid_block_res_sample if uncondition_side_control else torch.zeros_like(mid_block_res_sample)])
 
     pred = unet_sdxl(
-        torch.cat([latents_noised] * 2, dim=0),
+        torch.cat([latents_noised] * 2, dim=0), # type: ignore
         t,
         encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
             'scale': lora_scale
         } if lora_scale > 0 else {},
         added_cond_kwargs=added_cond_kwargs,
+        down_block_additional_residuals=down_block_res_samples,
+        mid_block_additional_residual=mid_block_res_sample,
     ).sample
     noise_pred = get_noise_pred(scheduler, pred, t, latents_noised)
 
@@ -359,9 +481,10 @@ def predict_noise_z123( # for any z123-based models
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     pred = unet_z123(
-        torch.cat([torch.cat([latents_noised] * 2, dim=0), torch.cat([latents_image] * 2, dim=0)], dim=1),
+        torch.cat([torch.cat([latents_noised] * 2, dim=0), torch.cat([latents_image] * 2, dim=0)], dim=1), # type: ignore
         t,
         encoder_hidden_states=torch.cat([angle_embeddings_conditional, angle_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
@@ -407,12 +530,13 @@ def predict_noise_mvdream(
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     batch_size = len(text_embeddings_conditional)
     assert batch_size == len(text_embeddings_unconditional)
 
     pred = unet_mvdream(
-        x=torch.cat([latents_noised] * 2),
+        x=torch.cat([latents_noised] * 2), # type: ignore
         timesteps=torch.tensor([t] * batch_size * 2, device=t.device),
         context=torch.stack(text_embeddings_conditional + text_embeddings_unconditional),
         num_frames=batch_size,
@@ -457,9 +581,10 @@ def predict_velocity_lora(
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     pred = unet_lora(
-        torch.cat([latents_noised] * 2, dim=0),
+        torch.cat([latents_noised] * 2, dim=0), # type: ignore
         t,
         encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
@@ -511,6 +636,7 @@ def predict_velocity_base(
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+    latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     pred = unet_base(
         torch.cat([latents_noised] * 2, dim=0),
