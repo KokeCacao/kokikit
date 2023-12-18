@@ -2,13 +2,21 @@
 import torch
 import math
 import numpy as np
+import warnings
 
 from typing import Optional, Any, Sequence, List, Dict
 from torch import Tensor
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
+
+GAUSSIAN=False
+try:
+    GAUSSIAN=True
+    from diff_gaussian_rasterization import (
+        GaussianRasterizationSettings,
+        GaussianRasterizer,
+    )
+except ImportError as e:
+    warnings.warn(f"WARNING: {e}\nNeRF Acceleration (gs) is disabled because you don't have diff_gaussian_rasterization package.", ImportWarning)
+    
 from simple_knn._C import distCUDA2 # You need to import torch before importing this
 
 from ..utils.utils import quaternion_to_3x3_rotation, scale_quaternion_to_3x3_matrix
@@ -602,21 +610,25 @@ class Gaussian(FieldBase):
             znear=ray_bundle.near_plane,
             zfar=ray_bundle.far_plane,
         )
-        # TODO: shitcode
-        rasterizer = GaussianRasterizer(raster_settings=GaussianRasterizationSettings(
-            image_height=H,
-            image_width=W,
-            tanfovx=math.tan(viewpoint_camera.FoVx * 0.5),
-            tanfovy=math.tan(viewpoint_camera.FoVy * 0.5),
-            bg=self.bg_color.to(dtype=torch.float32),
-            scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform.to(dtype=torch.float32),
-            projmatrix=viewpoint_camera.full_proj_transform.to(dtype=torch.float32),
-            sh_degree=self.gaussians.active_sh_degree,
-            campos=viewpoint_camera.camera_center.to(dtype=torch.float32),
-            prefiltered=False,
-            debug=True,
-        ))
+        # TODO: shitcode below
+        try:
+            rasterizer = GaussianRasterizer(raster_settings=GaussianRasterizationSettings(
+                image_height=H,
+                image_width=W,
+                tanfovx=math.tan(viewpoint_camera.FoVx * 0.5),
+                tanfovy=math.tan(viewpoint_camera.FoVy * 0.5),
+                bg=self.bg_color.to(dtype=torch.float32),
+                scale_modifier=scaling_modifier,
+                viewmatrix=viewpoint_camera.world_view_transform.to(dtype=torch.float32),
+                projmatrix=viewpoint_camera.full_proj_transform.to(dtype=torch.float32),
+                sh_degree=self.gaussians.active_sh_degree,
+                campos=viewpoint_camera.camera_center.to(dtype=torch.float32),
+                prefiltered=False,
+                debug=True,
+            ))
+        except:
+            # TODO: add support for users without gs (espacially MPS users)
+            raise NotImplementedError
 
         means3D = self.gaussians.get_xyz
         means2D = screenspace_points
