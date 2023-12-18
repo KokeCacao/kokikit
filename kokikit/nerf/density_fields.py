@@ -7,10 +7,12 @@ if TYPE_CHECKING:
 
 import numpy as np
 import torch
+TCNN = False
 try:
+    TCNN = True
     import tinycudann as tcnn
 except EnvironmentError as e:
-    warnings.warn(f"WARNING: {e}\nThis error is fine for CPU-only mode.", ImportWarning)
+    warnings.warn(f"WARNING: {e}\nNeRF Acceleration (tcnn) is disabled because you don't have tinycudann package.", ImportWarning)
 
 from .nerf_fields import NeRFField
 from .nerf_fields import FARTNeRFContraction
@@ -60,16 +62,20 @@ class HashMLPDensityField(NeRFField):
         }
 
         try:
-            if self.use_linear:
-                self.encoding = tcnn.Encoding(n_input_dims=3, encoding_config=config["encoding"])
-                self.linear = torch.nn.Linear(self.encoding.n_output_dims, 1)
+            if TCNN:
+                if self.use_linear:
+                    self.encoding = tcnn.Encoding(n_input_dims=3, encoding_config=config["encoding"])
+                    self.linear = torch.nn.Linear(self.encoding.n_output_dims, 1)
+                else:
+                    self.mlp_base = tcnn.NetworkWithInputEncoding(
+                        n_input_dims=3,
+                        n_output_dims=1,
+                        encoding_config=config["encoding"],
+                        network_config=config["network"],
+                    )
             else:
-                self.mlp_base = tcnn.NetworkWithInputEncoding(
-                    n_input_dims=3,
-                    n_output_dims=1,
-                    encoding_config=config["encoding"],
-                    network_config=config["network"],
-                )
+                # TODO: add support for users without tcnn (espacially MPS users)
+                raise NotImplementedError
         except NameError as e:
             if self.use_linear:
                 self.encoding = torch.nn.Linear(1, 1) # dummy

@@ -2,10 +2,13 @@ import numpy as np
 import torch
 import warnings
 import random
+
+TCNN = False
 try:
+    TCNN = True
     import tinycudann as tcnn
 except EnvironmentError as e:
-    warnings.warn(f"WARNING: {e}\nThis error is fine for CPU-only mode.", ImportWarning)
+    warnings.warn(f"WARNING: {e}\nNeRF Acceleration (tcnn) is disabled because you don't have tinycudann package.", ImportWarning)
 
 from enum import Enum, auto
 from typing import Any, Callable, Dict, Iterator, List, Tuple, Union
@@ -113,14 +116,18 @@ class SHMLPBackground(torch.nn.Module):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.n_output_dims = 3
-        self.encoder = tcnn.Encoding(
-            n_input_dims=3,
-            encoding_config={
-                "otype": "SphericalHarmonics",
-                "degree": 3,
-            },
-            dtype=torch.float32, # ENHANCE: default float16 seems unstable...
-        )
+        if TCNN:
+            self.encoder = tcnn.Encoding(
+                n_input_dims=3,
+                encoding_config={
+                    "otype": "SphericalHarmonics",
+                    "degree": 3,
+                },
+                dtype=torch.float32, # ENHANCE: default float16 seems unstable...
+            )
+        else:
+            # TODO: add support for users without tcnn (espacially MPS users)
+            raise NotImplementedError
         self.mlp = MLP(
             dim_in=self.encoder.n_output_dims,
             dim_out=self.n_output_dims,
@@ -176,6 +183,7 @@ class TCNNWithMLP(torch.nn.Module):
         # File ".../lib/python3.8/site-packages/tinycudann/modules.py", line 145, in backward
         # doutput_grad, params_grad, input_grad = ctx.ctx_fwd.native_tcnn_module.bwd_bwd_input(
         # RuntimeError: DifferentiableObject::backward_backward_input_impl: not implemented error
+        assert TCNN, "TCNNWithMLP requires tinycudann package"
         self.encoder = tcnn.Encoding(
             n_input_dims=dim,
             encoding_config={
