@@ -16,8 +16,13 @@ try:
     )
 except ImportError as e:
     warnings.warn(f"WARNING: {e}\nNeRF Acceleration (gs) is disabled because you don't have diff_gaussian_rasterization package.", ImportWarning)
-    
-from simple_knn._C import distCUDA2 # You need to import torch before importing this
+
+SIMPLE_KNN=False
+try:
+    SIMPLE_KNN=True
+    from simple_knn._C import distCUDA2 # You need to import torch before importing this
+except ImportError as e:
+    warnings.warn(f"WARNING: {e}\nNeRF Acceleration (gs) is disabled because you don't have simple_knn package.", ImportWarning)
 
 from ..utils.utils import quaternion_to_3x3_rotation, scale_quaternion_to_3x3_matrix
 from ..nerf.rays import RayBundle
@@ -325,6 +330,7 @@ class GaussianModel:
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
+        assert SIMPLE_KNN, "simple_knn is not installed"
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")

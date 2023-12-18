@@ -15,7 +15,7 @@ dependencies = [
   "pycolmap",
   "tinycudann @ git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch ; platform_system != 'Darwin'",
   "diff_gaussian_rasterization @ git+https://github.com/ashawkey/diff-gaussian-rasterization ; platform_system != 'Darwin'",
-  "simple_knn @ git+https://gitlab.inria.fr/bkerbl/simple-knn",
+  "simple_knn @ git+https://gitlab.inria.fr/bkerbl/simple-knn ; platform_system != 'Darwin'",
 ]
 requires-python = ">=3.8"
 authors = [{ name = "Koke_Cacao", email = "i@kokecacao.me" }]
