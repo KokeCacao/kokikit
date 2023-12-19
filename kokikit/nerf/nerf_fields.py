@@ -7,7 +7,7 @@ TCNN = False
 try:
     TCNN = True
     import tinycudann as tcnn
-except EnvironmentError as e:
+except ImportError as e:
     warnings.warn(f"WARNING: {e}\nNeRF Acceleration (tcnn) is disabled because you don't have tinycudann package.", ImportWarning)
 
 from enum import Enum, auto
