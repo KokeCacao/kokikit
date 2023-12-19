@@ -3,7 +3,13 @@ import torch
 import itertools
 import os
 import numpy as np
-import nvdiffrast.torch as dr
+
+NVDIFFRAST = False
+try:
+    NVDIFFRAST = True
+    import nvdiffrast.torch as dr
+except ImportError as e:
+    warnings.warn(f"WARNING: {e}\nDMTet is disabled because you don't have nvdiffrast package.", ImportWarning)
 
 from typing import Optional, Any, Union, Literal, Sequence, Dict, List
 from torch import Tensor
