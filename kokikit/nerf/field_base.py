@@ -2,7 +2,7 @@ import torch
 import warnings
 
 from torch import Tensor
-from diffusers import AutoencoderKL
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from typing import Union, Any, Sequence, Tuple, Iterator, List, Dict, Optional
 from .rays import RayBundle
 from .renderers import Renderer
