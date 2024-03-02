@@ -115,7 +115,6 @@ class NeRFDataset(Dataset):
         # assert focal == w_latent / (2 * np.tan(fov_x / 2))
 
         rays_d = self._get_rays(
-            batch_size=batch_size,
             w_latent=w_latent,
             h_latent=h_latent,
             c2w=c2w,
@@ -167,7 +166,6 @@ class NeRFDataset(Dataset):
         fov_x: float = 2 * np.arctan(w_latent / (2 * focal)) # [1,]
         # assert focal == w_latent / (2 * np.tan(fov_x / 2))
         rays_d = self._get_rays(
-            batch_size=1,
             w_latent=w_latent, # note that we don't use config value
             h_latent=h_latent, # note that we don't use config value
             c2w=c2w,
@@ -263,7 +261,6 @@ class NeRFDataset(Dataset):
         # assert focal == w_latent / (2 * np.tan(fov_x / 2))
 
         rays_d = self._get_rays(
-            batch_size=selected_batch_size,
             w_latent=w_latent,
             h_latent=h_latent,
             c2w=c2w,
@@ -319,12 +316,12 @@ class NeRFDataset(Dataset):
         return projection.to(dtype=c2w.dtype) @ torch.inverse(c2w) # [1, 4, 4]
 
     @staticmethod
-    def _get_rays(batch_size: int, w_latent: int, h_latent: int, c2w: Tensor, focal: float, cx: float, cy: float, device: torch.device) -> Tensor:
+    def _get_rays(w_latent: int, h_latent: int, c2w: Tensor, focal: float, cx: float, cy: float, device: torch.device) -> Tensor:
         # get un-normalized ray direction
 
         W = w_latent
         H = h_latent
-        B = batch_size
+        B = c2w.shape[0]
 
         xs, ys = torch.meshgrid(
             torch.linspace(0, W - 1, W, device=device),

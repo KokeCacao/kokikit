@@ -424,6 +424,7 @@ class DreamfusionSampler(Sampler):
         assert ray_bundle.directions is not None
 
         device = ray_bundle.origins.device
+        # TODO: not sure if we need (0.0, 1.0 - (1.0 / num_samples))
         z_vals = torch.linspace(0.0, 1.0, num_samples, device=device) # [T]
         z_vals = z_vals[None, None, None, :, None] # [1, 1, 1, T, 1]
         nears = ray_bundle.nears.unsqueeze(-2) # [B, H, W, 1, 1]
@@ -490,6 +491,7 @@ class SpacedSampler(Sampler):
         assert ray_bundle.origins.shape[3] == 3
         num_rays = B * H * W
 
+        # TODO: not sure if we need (0.0, 1.0 - (1.0 / num_samples))
         bins = torch.linspace(0.0, 1.0, num_samples + 1, device=device, dtype=dtype)[None, None, None, ...] # [1, 1, 1, num_samples+1]
 
         if self.stratified:

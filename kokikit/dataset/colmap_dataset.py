@@ -562,7 +562,6 @@ class ColmapDataset(Dataset):
         focal = focal * self.scale_factor
 
         rays_d = NeRFDataset._get_rays(
-            batch_size=len(frame_indices),
             w_latent=w_latent,
             h_latent=h_latent,
             c2w=c2w,

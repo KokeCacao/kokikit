@@ -47,11 +47,21 @@ def seed(seed: int):
 
 
 def safe_normalize(x, dim=-1):
-    return x / torch.sqrt(torch.clamp(torch.sum(x * x, dim=dim, keepdim=True), min=EPS_1E20))
+    if isinstance(x, Tensor):
+        return x / torch.sqrt(torch.clamp(torch.sum(x * x, dim=dim, keepdim=True), min=EPS_1E20))
+    elif isinstance(x, np.ndarray):
+        return x / np.sqrt(np.maximum(np.sum(x * x, axis=dim, keepdims=True), EPS_1E20))
+    else:
+        raise ValueError(f"Unsupported type {type(x)}")
 
 
 def safe_magnitude(x, dim=-1):
-    return torch.sqrt(torch.clamp(torch.sum(x * x, dim=dim, keepdim=True), min=EPS_1E20))
+    if isinstance(x, Tensor):
+        return torch.sqrt(torch.clamp(torch.sum(x * x, dim=dim, keepdim=True), min=EPS_1E20))
+    elif isinstance(x, np.ndarray):
+        return np.sqrt(np.maximum(np.sum(x * x, axis=dim, keepdims=True), EPS_1E20))
+    else:
+        raise ValueError(f"Unsupported type {type(x)}")
 
 
 def is_normalized(x, dim=-1):
