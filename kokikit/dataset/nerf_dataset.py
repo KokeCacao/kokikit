@@ -332,7 +332,7 @@ class NeRFDataset(Dataset):
             indexing='xy',
         )
         xs = xs.reshape([1, H, W]).expand([B, H, W]) + 0.5 # [B, H, W], shift right
-        ys = ys.reshape([1, H, W]).expand([B, H, W]) - 0.5 # [B, H, W], shift down
+        ys = ys.reshape([1, H, W]).expand([B, H, W]) + 0.5 # [B, H, W], shift up
 
         zs = -torch.ones_like(xs) # pointing to -z axis
         xs = (xs - cx) / focal # = (xs - cx) / h_latent * (2 * np.tan(fov_y / 2))
