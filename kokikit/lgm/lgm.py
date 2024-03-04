@@ -1,29 +1,32 @@
 # adapted from https://github.com/3DTopia/LGM
+import pathlib
 import torch
+import io
 import numpy as np
 
 from torch import Tensor
-from typing import Tuple
+from typing import Tuple, Union
 from plyfile import PlyData, PlyElement
 
 from ..dataset.nerf_dataset import NeRFDataset
 from .aunet import UNet
 from ..dmtet.gaussian import InverseSigmoid
 
-def save_ply(gaussians, path, compatible=True):
+
+def save_ply(gaussians: Tensor, stream: Union[pathlib.Path, io.BytesIO], compatible: bool = True):
     # gaussians: [B, N, 14]
     # compatible: save pre-activated gaussians as in the original paper
 
     assert gaussians.shape[0] == 1, 'only support batch size 1'
-    
-    means3D = gaussians[0, :, 0:3].contiguous().float()
-    opacity = gaussians[0, :, 3:4].contiguous().float()
-    scales = gaussians[0, :, 4:7].contiguous().float()
-    rotations = gaussians[0, :, 7:11].contiguous().float()
+
+    means3D = gaussians[0, :, 0:3].contiguous().float() # [N, 3]
+    opacity = gaussians[0, :, 3:4].contiguous().float() # [N, 1]
+    scales = gaussians[0, :, 4:7].contiguous().float() # [N, 3]
+    rotations = gaussians[0, :, 7:11].contiguous().float() # [N, 4]
     shs = gaussians[0, :, 11:].unsqueeze(1).contiguous().float() # [N, 1, 3]
 
     # prune by opacity
-    mask = opacity.squeeze(-1) >= 0.005
+    mask = opacity.squeeze(-1) >= 0.005 # [N]
     means3D = means3D[mask]
     opacity = opacity[mask]
     scales = scales[mask]
@@ -37,32 +40,40 @@ def save_ply(gaussians, path, compatible=True):
         shs = (shs - 0.5) / 0.28209479177387814
 
     xyzs = means3D.detach().cpu().numpy()
-    f_dc = shs.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+    f_dc = shs.detach().transpose(1, 2) # [N, 3, 1] # TODO: why transpose and convert back
+    f_dc = f_dc.flatten(start_dim=1) # [N, 3]
+    f_dc = f_dc.contiguous().cpu().numpy() # [N, 3]
     opacities = opacity.detach().cpu().numpy()
     scales = scales.detach().cpu().numpy()
     rotations = rotations.detach().cpu().numpy()
 
-    l = ['x', 'y', 'z']
-    # All channels except the 3 DC
-    for i in range(f_dc.shape[1]):
-        l.append('f_dc_{}'.format(i))
-    l.append('opacity')
-    for i in range(scales.shape[1]):
-        l.append('scale_{}'.format(i))
-    for i in range(rotations.shape[1]):
-        l.append('rot_{}'.format(i))
-
-    dtype_full = [(attribute, 'f4') for attribute in l]
+    dtype_full = [
+        ('x', 'f4'),
+        ('y', 'f4'),
+        ('z', 'f4'),
+        ('f_dc_0', 'f4'),
+        ('f_dc_1', 'f4'),
+        ('f_dc_2', 'f4'),
+        ('opacity', 'f4'),
+        ('scale_0', 'f4'),
+        ('scale_1', 'f4'),
+        ('scale_2', 'f4'),
+        ('rot_0', 'f4'),
+        ('rot_1', 'f4'),
+        ('rot_2', 'f4'),
+        ('rot_3', 'f4'),
+    ]
 
     elements = np.empty(xyzs.shape[0], dtype=dtype_full)
     attributes = np.concatenate((xyzs, f_dc, opacities, scales, rotations), axis=1)
     elements[:] = list(map(tuple, attributes))
     el = PlyElement.describe(elements, 'vertex')
 
-    PlyData([el]).write(path)
-    
+    PlyData([el]).write(stream=stream)
+
 
 class LGM(torch.nn.Module):
+
     def __init__(
         self,
         down_channels: Tuple[int, ...],
@@ -74,13 +85,14 @@ class LGM(torch.nn.Module):
         splat_W: int,
     ):
         super().__init__()
-        
+
         self.split_H = splat_H
         self.split_W = splat_W
 
         # unet
         self.unet = UNet(
-            9, 14, 
+            9,
+            14,
             down_channels=down_channels,
             down_attention=down_attention,
             mid_attention=mid_attention,
@@ -101,10 +113,10 @@ class LGM(torch.nn.Module):
     @staticmethod
     def get_rays(device: torch.device, H: int = 256, W: int = 256, fovy_rad: float = np.deg2rad(49.1)) -> Tensor:
         thetas, phis, rays_o = NeRFDataset._get_round_rays_o(
-                batch_size=4,
-                radius_float=1.5,
-                idx=None,
-                device=device,
+            batch_size=4,
+            radius_float=1.5,
+            idx=None,
+            device=device,
         ) # [B,], [B,], [B, 3]
         up_vector, right_vector, forward_vector = NeRFDataset._get_lookat(
             batch_size=4,
@@ -120,7 +132,7 @@ class LGM(torch.nn.Module):
             rays_o=rays_o,
             device=device,
         ) # [B, 4, 4], [:, :3, 3] is rays_o
-        
+
         # [array([[1, 0, 0, 0],
         #        [0, 1, 0, 0],
         #        [0, 0, 1, 1.5],
@@ -137,27 +149,26 @@ class LGM(torch.nn.Module):
         #        [ 0, 1, 0, 0],
         #        [ 1, 0, 0, 0],
         #        [ 0, 0, 0, 1]], dtype=float32)]
-        
+
         focal: float = H / (2 * np.tan(fovy_rad / 2))
         rays_d = NeRFDataset._get_rays(W, H, c2w, focal, W / 2, H / 2, device) # [B, H, W, 3]
         rays_o = rays_o.reshape(rays_d.shape[0], 1, 1, rays_d.shape[-1]).expand_as(rays_d) # [B, 3] -> [B, H, W, 3]
         rays_embeddings = torch.cat([torch.cross(rays_o, rays_d, dim=-1), rays_d], dim=-1) # [B, H, W, 6]
         rays_embeddings = rays_embeddings.permute(0, 3, 1, 2).contiguous() # [B, 6, H, W]
         return rays_embeddings
-        
 
     def forward_gaussians(self, images):
         # images: [B, 4, 9, H, W]
         # return: Gaussians: [B, dim_t]
 
         B, V, C, H, W = images.shape
-        images = images.view(B*V, C, H, W)
+        images = images.view(B * V, C, H, W)
 
         x = self.unet(images) # [B*4, 14, h, w]
         x = self.conv(x) # [B*4, 14, h, w]
 
         x = x.reshape(B, 4, 14, self.split_H, self.split_W)
-        
+
         ## visualize multi-view gaussian features for plotting figure
         # tmp_alpha = self.opacity_act(x[0, :, 3:4])
         # tmp_img_rgb = self.rgb_act(x[0, :, 11:]) * tmp_alpha + (1 - tmp_alpha)
@@ -166,7 +177,7 @@ class LGM(torch.nn.Module):
         # kiui.vis.plot_image(tmp_img_pos, save=True)
 
         x = x.permute(0, 1, 3, 4, 2).reshape(B, -1, 14)
-        
+
         pos = self.pos_act(x[..., 0:3]) # [B, N, 3]
         opacity = self.opacity_act(x[..., 3:4])
         scale = self.scale_act(x[..., 4:7])
@@ -174,5 +185,5 @@ class LGM(torch.nn.Module):
         rgbs = self.rgb_act(x[..., 11:])
 
         gaussians = torch.cat([pos, opacity, scale, rotation, rgbs], dim=-1) # [B, N, 14]
-        
+
         return gaussians
