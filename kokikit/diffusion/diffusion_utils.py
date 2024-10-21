@@ -2,7 +2,7 @@ import torch
 
 from torch import Tensor
 from diffusers.models.controlnet import ControlNetModel
-from diffusers.models.unet_2d_condition import UNet2DConditionModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from diffusers.models.attention_processor import (
     AttnAddedKVProcessor,
@@ -177,7 +177,7 @@ def noise_to_velocity(noise: Tensor, t: Tensor, latents_noised: Tensor, schedule
 
 
 def velocity_to_noise(velocity: Tensor, t: Tensor, latents_noised: Tensor, scheduler):
-    alphas_cumprod = scheduler.alphas_cumprod
+    alphas_cumprod = scheduler.alphas_cumprod.to(velocity.device)
     alpha_t = alphas_cumprod[t]**0.5
     sigma_t = (1 - alphas_cumprod[t])**0.5
 

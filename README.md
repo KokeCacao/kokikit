@@ -4,7 +4,16 @@ A General NeRF and Diffusion Toolkit for [KatUI](https://github.com/KokeCacao/Ka
 ## Installation
 ```bash
 # for production
-pip install "git+https://github.com/KokeCacao/kokikit.git"
+pip install "kokikit[full] @ git+https://github.com/KokeCacao/kokikit.git"
+
+# if you only want diffusion stuff
+pip install "kokikit[diffusion] @ git+https://github.com/KokeCacao/kokikit.git"
+
+# if you only want nerf stuff
+pip install "kokikit[nerf] @ git+https://github.com/KokeCacao/kokikit.git"
+
+# if you only want nerf and reconstruction stuff
+pip install "kokikit[reconstruction] @ git+https://github.com/KokeCacao/kokikit.git"
 
 # for developers who intend to edit the module (but pylance will lint incorrectly)
 git clone https://github.com/KokeCacao/kokikit.git
