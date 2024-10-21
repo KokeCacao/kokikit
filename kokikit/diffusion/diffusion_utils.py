@@ -249,6 +249,8 @@ def predict_noise_sd( # for any stable-diffusion-based models
         scheduler: DDIMScheduler,
         reconstruction_loss: bool,
         cfg_rescale: float,
+        # inpainting
+        extra_latents: Optional[Tensor] = None,
         # controlnet
         controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
         image: Optional[Union[Tensor, List[Tensor]]] = None,
@@ -260,6 +262,8 @@ def predict_noise_sd( # for any stable-diffusion-based models
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+        if extra_latents is not None:
+            extra_latents = extra_latents.to(memory_format=torch.channels_last) # type: ignore
     latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     down_block_res_samples, mid_block_res_sample = None, None
@@ -281,7 +285,7 @@ def predict_noise_sd( # for any stable-diffusion-based models
         )
 
     pred = unet_sd(
-        torch.cat([latents_noised] * 2, dim=0), # type: ignore
+        torch.cat([torch.cat([latents_noised, extra_latents], dim=1) if extra_latents is not None else latents_noised] * 2, dim=0), # type: ignore
         t,
         encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
@@ -322,6 +326,8 @@ def predict_noise_sdxl_turbo(
     t: Tensor,
     scheduler: DDIMScheduler,
     reconstruction_loss: bool,
+    # inpainting
+    extra_latents: Optional[Tensor] = None,
     # controlnet
     controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
     image: Optional[Union[Tensor, List[Tensor]]] = None,
@@ -334,6 +340,8 @@ def predict_noise_sdxl_turbo(
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+        if extra_latents is not None:
+            extra_latents = extra_latents.to(memory_format=torch.channels_last) # type: ignore
     latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     added_cond_kwargs = {
@@ -356,7 +364,7 @@ def predict_noise_sdxl_turbo(
         )
 
     pred = unet_sdxl(
-        latents_noised,
+        torch.cat([latents_noised, extra_latents], dim=1) if extra_latents is not None else latents_noised,
         t,
         encoder_hidden_states=text_embeddings_unconditional,
         cross_attention_kwargs={
@@ -391,6 +399,8 @@ def predict_noise_sdxl(
     scheduler: DDIMScheduler,
     reconstruction_loss: bool,
     cfg_rescale: float,
+    # inpainting
+    extra_latents: Optional[Tensor] = None,
     # controlnet
     controlnet: Optional[Union[ControlNetModel, List[ControlNetModel]]] = None,
     image: Optional[Union[Tensor, List[Tensor]]] = None,
@@ -402,6 +412,8 @@ def predict_noise_sdxl(
     if torch.backends.cudnn.version() >= 7603: # type: ignore
         # memory format convertion (https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html)
         latents_noised = latents_noised.to(memory_format=torch.channels_last) # type: ignore
+        if extra_latents is not None:
+            extra_latents = extra_latents.to(memory_format=torch.channels_last) # type: ignore
     latents_noised = scheduler.scale_model_input(sample=latents_noised, timestep=int(t.item())) # type: ignore
 
     added_cond_kwargs = {
@@ -432,7 +444,7 @@ def predict_noise_sdxl(
         mid_block_res_sample = torch.cat([mid_block_res_sample if condition_side_control else torch.zeros_like(mid_block_res_sample), mid_block_res_sample if uncondition_side_control else torch.zeros_like(mid_block_res_sample)])
 
     pred = unet_sdxl(
-        torch.cat([latents_noised] * 2, dim=0), # type: ignore
+        torch.cat([torch.cat([latents_noised, extra_latents], dim=1) if extra_latents is not None else latents_noised] * 2, dim=0), # type: ignore
         t,
         encoder_hidden_states=torch.cat([text_embeddings_conditional, text_embeddings_unconditional], dim=0),
         cross_attention_kwargs={
