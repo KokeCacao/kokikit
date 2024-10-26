@@ -7,16 +7,32 @@ import shutil
 import psutil
 
 from datetime import datetime
-try:
-    from torch.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
-except ImportError:
-    from torch.cuda.amp import custom_bwd, custom_fwd
 from torch import Tensor
 from pathlib import Path
 from torch.autograd import Function
 from typing import Any, Union, List, Tuple, Dict, Callable
+from functools import partial
 
 from .const import *
+
+
+def custom_amp_decorator(dec: Callable, cuda_amp_deprecated: bool):
+    def decorator(*args, **kwargs):
+        if cuda_amp_deprecated:
+            kwargs["device_type"] = "cuda"
+        return dec(*args, **kwargs)
+    return decorator
+
+
+if hasattr(torch.amp, "custom_fwd"): # type: ignore[attr-defined]
+    deprecated = True
+    from torch.amp import custom_fwd, custom_bwd # type: ignore[attr-defined]
+else:
+    deprecated = False
+    from torch.cuda.amp import custom_fwd, custom_bwd
+
+custom_fwd = custom_amp_decorator(custom_fwd, deprecated)
+custom_bwd = custom_amp_decorator(custom_bwd, deprecated)
 
 
 class _TruncExp(Function):
