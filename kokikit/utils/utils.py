@@ -13,9 +13,29 @@ except ImportError:
     from torch.cuda.amp import custom_bwd, custom_fwd
 from torch import Tensor
 from pathlib import Path
-from typing import Any, Union, List, Tuple, Dict
+from torch.autograd import Function
+from typing import Any, Union, List, Tuple, Dict, Callable
 
 from .const import *
+
+
+class _TruncExp(Function):
+    # Implementation from torch-ngp:
+    # https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return torch.exp(x)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, g):
+        x = ctx.saved_tensors[0]
+        return g * torch.exp(x.clamp(-15, 15))
+
+
+trunc_exp: Callable[..., Any] = _TruncExp.apply
 
 
 class SpecifyGradient(torch.autograd.Function):
@@ -133,8 +153,9 @@ def get_mem_info():
     ]
     return ' | '.join(ret)
 
+
 def quaternion_to_3x3_rotation(quaternion: Tensor):
-    norm = torch.sqrt(quaternion[:,0]*quaternion[:,0] + quaternion[:,1]*quaternion[:,1] + quaternion[:,2]*quaternion[:,2] + quaternion[:,3]*quaternion[:,3])
+    norm = torch.sqrt(quaternion[:, 0] * quaternion[:, 0] + quaternion[:, 1] * quaternion[:, 1] + quaternion[:, 2] * quaternion[:, 2] + quaternion[:, 3] * quaternion[:, 3])
 
     quaternion = quaternion / norm[:, None] # [B, 4]
 
@@ -145,25 +166,26 @@ def quaternion_to_3x3_rotation(quaternion: Tensor):
     y = quaternion[:, 2]
     z = quaternion[:, 3]
 
-    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
-    R[:, 0, 1] = 2 * (x*y - quaternion*z)
-    R[:, 0, 2] = 2 * (x*z + quaternion*y)
-    R[:, 1, 0] = 2 * (x*y + quaternion*z)
-    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
-    R[:, 1, 2] = 2 * (y*z - quaternion*x)
-    R[:, 2, 0] = 2 * (x*z - quaternion*y)
-    R[:, 2, 1] = 2 * (y*z + quaternion*x)
-    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    R[:, 0, 0] = 1 - 2 * (y * y + z * z)
+    R[:, 0, 1] = 2 * (x * y - quaternion * z)
+    R[:, 0, 2] = 2 * (x * z + quaternion * y)
+    R[:, 1, 0] = 2 * (x * y + quaternion * z)
+    R[:, 1, 1] = 1 - 2 * (x * x + z * z)
+    R[:, 1, 2] = 2 * (y * z - quaternion * x)
+    R[:, 2, 0] = 2 * (x * z - quaternion * y)
+    R[:, 2, 1] = 2 * (y * z + quaternion * x)
+    R[:, 2, 2] = 1 - 2 * (x * x + y * y)
     return R # [B, 3, 3]
+
 
 def scale_quaternion_to_3x3_matrix(scale: Tensor, quaternion: Tensor):
     # scale: [B, 3]
     # quaternion: [B, 4]
     R = quaternion_to_3x3_rotation(quaternion)
-    
+
     S = torch.eye(3, device=scale.device, dtype=scale.dtype).repeat(scale.shape[0], 1, 1)
     for i in range(3):
         S[:, i, i] = scale[:, i]
-    
+
     combined_transform = torch.matmul(R, S)
     return combined_transform # [B, 3, 3]

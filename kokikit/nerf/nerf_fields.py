@@ -16,11 +16,6 @@ from torch import Tensor
 from torch.nn.parameter import Parameter
 from torch.cuda.amp.autocast_mode import autocast
 from typing_extensions import Literal
-from torch.autograd import Function
-try:
-    from torch.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
-except ImportError:
-    from torch.cuda.amp import custom_bwd, custom_fwd
 from ..utils.const import *
 from .ray_samplers import RaySamples, NeRFAccSamples
 from .renderers import SHRenderer
@@ -32,24 +27,6 @@ class FARTNeRFContraction(Enum):
     L2_CONTRACTION = auto()
     LINF_CONTRACTION = auto()
 
-
-class _TruncExp(Function):
-    # Implementation from torch-ngp:
-    # https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
-    @staticmethod
-    @custom_fwd(cast_inputs=torch.float32)
-    def forward(ctx, x):
-        ctx.save_for_backward(x)
-        return torch.exp(x)
-
-    @staticmethod
-    @custom_bwd
-    def backward(ctx, g):
-        x = ctx.saved_tensors[0]
-        return g * torch.exp(x.clamp(-15, 15))
-
-
-trunc_exp: Callable[..., Any] = _TruncExp.apply
 
 
 class MLP(torch.nn.Module):
