@@ -17,7 +17,10 @@ from torch.nn.parameter import Parameter
 from torch.cuda.amp.autocast_mode import autocast
 from typing_extensions import Literal
 from torch.autograd import Function
-from torch.cuda.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
+try:
+    from torch.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
+except ImportError:
+    from torch.cuda.amp import custom_bwd, custom_fwd
 from ..utils.const import *
 from .ray_samplers import RaySamples, NeRFAccSamples
 from .renderers import SHRenderer

@@ -7,7 +7,10 @@ import shutil
 import psutil
 
 from datetime import datetime
-from torch.cuda.amp import custom_bwd, custom_fwd # type: ignore
+try:
+    from torch.amp import custom_bwd, custom_fwd # type: ignore[attr-defined]
+except ImportError:
+    from torch.cuda.amp import custom_bwd, custom_fwd
 from torch import Tensor
 from pathlib import Path
 from typing import Any, Union, List, Tuple, Dict
